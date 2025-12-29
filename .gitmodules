@@ -2,3 +2,8 @@
 	path = moonbit-agent-guide
 	url = https://github.com/moonbitlang/moonbit-agent-guide.git
 	branch = main
+
+[submodule "moonbit-spec-test-development"]
+	path = moonbit-spec-test-development
+	url = https://github.com/bobzhang/moonbit-spec-test-development.git
+	branch = main
