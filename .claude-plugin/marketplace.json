@@ -9,8 +9,14 @@
   "plugins": [
     {
       "name": "moonbit-agent-guide",
-      "description": "Guide for writing, refactoring, and testing MoonBit projects. Use when working in MoonBit modules or packages, organizing MoonBit files, using moon tooling (build/check/test/doc/ide), or following MoonBit-specific layout, documentation, and testing conventions.",
+      "description": "Guide for writing, refactoring, and testing MoonBit projects.",
       "source": "./moonbit-agent-guide",
+      "category": "development"
+    },
+    {
+      "name": "moonbit-spec-test-development",
+      "description": "Create formal spec-driven MoonBit APIs and test suites.",
+      "source": "./moonbit-spec-test-development",
       "category": "development"
     }
   ]
