@@ -7,3 +7,8 @@
 	path = moonbit-spec-test-development
 	url = https://github.com/bobzhang/moonbit-spec-test-development.git
 	branch = main
+
+[submodule "moonbit-lang"]
+	path = moonbit-lang
+	url = https://github.com/Milky2018/moonbit-lang-skill.git
+	branch = main
