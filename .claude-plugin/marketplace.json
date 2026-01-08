@@ -28,8 +28,14 @@
     {
       "name": "moonbit-extract-spec-test",
       "description": "Extract formal spec and comprehensive test suites from existing MoonBit implementations.",
-      "source": "./moonbit-extract-spec-test/.moonagent/skills/moonbit-extract-spec-test",
-      "category": "development"
+      "source": {
+        "source": "github",
+        "repo": "moonbitlang/spec-tests"
+      },
+      "strict": false,
+      "skills": [
+        "./.moonagent/skills/moonbit-extract-spec-test"
+      ]
     }
   ]
 }
