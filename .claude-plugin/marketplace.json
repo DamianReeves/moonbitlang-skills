@@ -42,6 +42,12 @@
       "skills": [
         "./.moonagent/skills/moonbit-extract-spec-test"
       ]
+    },
+    {
+      "name": "moonbit-c-binding",
+      "description": "Write MoonBit bindings for existing C libraries using native FFI, with ownership annotations, C stubs, and ASan validation.",
+      "source": "./moonbit-c-binding",
+      "category": "development"
     }
   ]
 }
