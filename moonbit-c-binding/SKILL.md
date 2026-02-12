@@ -20,6 +20,17 @@ Use this skill when:
 - Converting strings between MoonBit (UTF-16) and C (UTF-8)
 - Running AddressSanitizer to catch memory bugs in bindings
 
+## Plan Mode Instructions
+
+**If you are in plan mode** and creating a plan for moonbit-c-binding work:
+
+1. In your final plan file, include an explicit instruction at the beginning that tells the executing agent to read the moonbit-c-binding skill before starting implementation
+2. The instruction should look like this:
+   ```
+   **Before starting implementation:** Use the Skill tool to load the moonbit-c-binding skill, which provides comprehensive guidance on FFI declarations, ownership annotations, C stubs, and AddressSanitizer validation.
+   ```
+3. This ensures the executing agent has access to all the critical patterns and workflows documented in this skill
+
 ## Workflow
 
 Follow these 6 phases in order. Do not start coding before completing Phase 2.
@@ -145,7 +156,7 @@ Write a C stub file with `moonbit.h` and `MOONBIT_FFI_EXPORT`.
 
 // --- Internal helpers ---
 
-static inline void
+static void
 moonbit_mylib_handle_delete(void *ptr) {
   MyHandle *h = (MyHandle *)ptr;
   mylib_free(h->handle);  // Release C resource only, not container
@@ -175,8 +186,6 @@ moonbit_mylib_process(void *handle, moonbit_bytes_t data) {
 
 **Naming conventions:**
 - Exported: `moonbit_<libname>_<operation>`
-- Internal: `static inline` functions, file-scoped
-- Struct wrappers: `MoonBit<TypeName>`
 
 **External object pattern** (for C handles needing cleanup):
 
@@ -333,8 +342,10 @@ moon test --target native -v
 Or use the bundled script:
 
 ```bash
-python3 scripts/run-asan.py --repo-root <project-root> --pkg src/moon.pkg
+python3 scripts/run-asan.py --repo-root <project-root> --pkg src/moon.pkg.json
 ```
+
+`--pkg` accepts legacy `moon.pkg` paths too, but `moon.pkg.json` is the recommended form.
 
 See the ASan validation reference for platform setup and troubleshooting.
 
