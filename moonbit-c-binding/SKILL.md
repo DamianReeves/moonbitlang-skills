@@ -47,7 +47,7 @@ Map C types to MoonBit types before writing any declarations.
 | `uint8_t`, `char` | `Byte` | Single byte |
 | `void` | `Unit` | Return type only |
 | `void *` (opaque, GC-managed) | `type Handle` (opaque) | External object with finalizer |
-| `void *` (opaque, C-managed) | `#external type Handle` | No GC tracking; C manages lifetime |
+| `void *` (opaque, C-managed) | `type Handle` with `#external` annotation | No GC tracking; C manages lifetime |
 | `const uint8_t *`, `uint8_t *` | `Bytes` or `FixedArray[Byte]` | Use `#borrow` if C doesn't store it |
 | `const char *` (UTF-8 string) | `Bytes` | Null-terminated by runtime; pass directly to C |
 | `struct *` (small, no cleanup) | `struct Foo(Bytes)` | Value-as-Bytes pattern |
@@ -142,13 +142,14 @@ MoonBitTSParser *moonbit_ts_parser_new(void) {
 }
 ```
 
-**`#external type` pattern** (C pointer, C-managed lifetime):
+**`#external` annotation pattern** (C pointer, C-managed lifetime):
 
-When C fully manages the pointer's lifetime (no GC cleanup needed), use `#external type` instead. The pointer is passed as raw `void*` without reference counting:
+When C fully manages the pointer's lifetime (no GC cleanup needed), annotate the type with `#external`. The pointer is passed as raw `void*` without reference counting:
 
 ```mbt nocheck
 ///|
-#external type RawPtr  // void*, not GC-tracked
+#external
+type RawPtr  // void*, not GC-tracked
 
 ///|
 extern "c" fn raw_create() -> RawPtr = "lib_create"
@@ -156,6 +157,8 @@ extern "c" fn raw_create() -> RawPtr = "lib_create"
 ///|
 extern "c" fn raw_destroy(ptr : RawPtr) = "lib_destroy"
 ```
+
+`#external` is an annotation (like `#borrow` and `#owned`) — it goes on its own line before the `type` declaration, not on the same line.
 
 No C stub wrapper or `moonbit_make_external_object` is needed — the MoonBit extern calls the C function directly. Use this when the C API has explicit create/destroy functions and you want manual lifetime control.
 
@@ -295,7 +298,7 @@ See @references/asan-validation.md for details.
 | C reads pointer only during call | `#borrow(param)` | No decref in C |
 | C takes ownership of pointer | `#owned(param)` | C must `moonbit_decref` |
 | C handle needs cleanup on GC | External object + finalizer | `moonbit_make_external_object` |
-| C pointer, C manages lifetime | `#external type` | No GC tracking; call C destroy explicitly |
+| C pointer, C manages lifetime | `#external` annotation on `type` | No GC tracking; call C destroy explicitly |
 | Small C struct, no cleanup | Value-as-Bytes | `moonbit_make_bytes` + `struct Foo(Bytes)` |
 | C returns null on failure | Nullable wrapper | Check null, return `Option` or raise error |
 | Callback with data parameter | FuncRef + Callback trick | See @references/callbacks.md |
