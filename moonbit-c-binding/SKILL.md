@@ -98,7 +98,7 @@ options(
 
 > **Warning — `cc`/`cc-flags` portability:** Setting `cc` disables TCC for debug builds. Setting `cc-flags` with `-I`/`-L` breaks Windows portability. Only set these for system libraries.
 
-**Including library sources:** All files in `"native-stub"` must be in the same directory as `moon.pkg`. For inclusion strategies (flattening, header-only, system library linking), see @references/amalgamation-build.md.
+**Including library sources:** All files in `"native-stub"` must be in the same directory as `moon.pkg`. For inclusion strategies (flattening, header-only, system library linking), see @references/including-c-sources.md.
 
 ### Phase 2: FFI Layer
 
@@ -324,5 +324,5 @@ See @references/asan-validation.md for details.
 
 @references/ownership-and-memory.md
 @references/callbacks.md
-@references/amalgamation-build.md
+@references/including-c-sources.md
 @references/asan-validation.md
