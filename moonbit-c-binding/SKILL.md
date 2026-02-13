@@ -52,7 +52,7 @@ Map C types to MoonBit types before writing any declarations.
 | `struct *` (small, no cleanup) | `struct Foo(Bytes)` | Value-as-Bytes pattern |
 | `struct *` (needs cleanup) | `type Foo` (opaque) | External object with finalizer |
 | `int` (enum/flags) | `UInt` or `Int` | Map to MoonBit enum in wrapper |
-| callback function pointer | `FuncRef[...]` or closure | See @references/callbacks-and-external-objects.md |
+| callback function pointer | `FuncRef[...]` or closure | See @references/callbacks.md |
 | output `int *` | `Ref[Int]` | Borrow the Ref |
 
 ## Workflow
@@ -250,7 +250,7 @@ pub fn result_from_status(status : Int) -> Unit raise {
 }
 ```
 
-For callback patterns (FuncRef, closures, trampolines), see @references/callbacks-and-external-objects.md.
+For callback patterns (FuncRef, closures, trampolines), see @references/callbacks.md.
 
 ### Phase 4: Testing
 
@@ -278,8 +278,8 @@ See @references/asan-validation.md for details.
 | C handle needs cleanup on GC | External object + finalizer | `moonbit_make_external_object` |
 | Small C struct, no cleanup | Value-as-Bytes | `moonbit_make_bytes` + `struct Foo(Bytes)` |
 | C returns null on failure | Nullable wrapper | Check null, return `Option` or raise error |
-| Callback with data parameter | FuncRef + Callback trick | See @references/callbacks-and-external-objects.md |
-| Callback without data parameter | FuncRef only | See @references/callbacks-and-external-objects.md |
+| Callback with data parameter | FuncRef + Callback trick | See @references/callbacks.md |
+| Callback without data parameter | FuncRef only | See @references/callbacks.md |
 | C string (UTF-8) output | `Bytes` across FFI | `moonbit_make_bytes` + `memcpy` in C; `@utf8.decode_lossy` in MoonBit |
 | Output parameter (`int *result`) | `Ref[T]` with `#borrow` | C writes into Ref, MoonBit reads `.val` |
 
@@ -300,6 +300,6 @@ See @references/asan-validation.md for details.
 ## References
 
 @references/ownership-and-memory.md
-@references/callbacks-and-external-objects.md
+@references/callbacks.md
 @references/amalgamation-build.md
 @references/asan-validation.md
