@@ -546,7 +546,8 @@ def _is_entry_package(pkg_path: Path) -> bool:
         data = json.loads(text)
         if data.get("is-main") or data.get("is_main"):
             return True
-    # Check for *_test.mbt files in the same directory
+    # Heuristic: check for *_test.mbt files in the same directory.
+    # Note: this won't detect test blocks inside non-_test.mbt files.
     pkg_dir = pkg_path.parent
     if list(pkg_dir.glob("*_test.mbt")):
         return True
@@ -581,6 +582,12 @@ def main():
     repo_root = args.repo_root.resolve()
     if not repo_root.is_dir():
         sys.exit(f"--repo-root is not a directory: {repo_root}")
+    if not (repo_root / "moon.mod.json").is_file():
+        print(
+            f"Warning: no moon.mod.json found in {repo_root}. "
+            "Is --repo-root pointing at the right directory?",
+            file=sys.stderr,
+        )
 
     pkg_paths: list[Path] = []
     seen_pkg_paths: set[Path] = set()

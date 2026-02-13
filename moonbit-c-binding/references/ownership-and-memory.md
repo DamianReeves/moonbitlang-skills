@@ -49,9 +49,13 @@ What refcount operations are required for each action on a parameter:
 | Return | nothing |
 | End of scope (not returned) | `moonbit_decref` |
 
-## C-side `moonbit_decref` Rules
+Practical rules for `#owned`:
 
-With `#owned`, C owns each non-primitive parameter and must decref it:
+- Call `moonbit_decref()` exactly once per owned parameter before the function returns.
+- If storing the object longer-term, decref when the storage is torn down.
+- Every early-return path must still decref all owned parameters.
+
+Example:
 
 ```c
 MOONBIT_FFI_EXPORT
@@ -64,12 +68,6 @@ moonbit_process(void *handle, moonbit_bytes_t data) {
   return result;
 }
 ```
-
-Rules:
-
-- Call `moonbit_decref()` exactly once per owned parameter.
-- If storing the object longer-term, decref when the storage is torn down.
-- Every early-return path must still decref all owned parameters.
 
 ## `Ref[T]` Output Parameters
 

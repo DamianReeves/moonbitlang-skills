@@ -43,7 +43,7 @@ Map C types to MoonBit types before writing any declarations.
 | `uint64_t` | `UInt64` | 64-bit unsigned |
 | `float` | `Float` | 32-bit float |
 | `double` | `Double` | 64-bit float |
-| `bool` | `Bool` | C ABI is `int32_t`, not C `bool` |
+| `bool` | `Bool` | Passed as `int32_t` in the C ABI (not C99 `_Bool`) |
 | `uint8_t`, `char` | `Byte` | Single byte |
 | `void` | `Unit` | Return type only |
 | `void *` (opaque, GC-managed) | `type Handle` (opaque) | External object with finalizer |
