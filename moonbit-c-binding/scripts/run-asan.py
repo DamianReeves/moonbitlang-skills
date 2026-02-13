@@ -2,20 +2,20 @@
 """Run MoonBit native tests with AddressSanitizer.
 
 Snapshots each specified package file (`moon.pkg` DSL or `moon.pkg.json`),
-patches `link.native` with ASan compile/link flags, sets MOON_CC/MOON_AR
-env vars to override the compiler, disables mimalloc, runs `moon test`,
+patches `link.native` with ASan flags, disables mimalloc, runs `moon test`,
 and restores everything in a finally block.
 
-The script uses three mechanisms:
-  - MOON_CC/MOON_AR env vars: override the compiler and archiver for both
-    MoonBit-generated C and stub C compilation (avoids ASan runtime mismatches)
-  - Package config patching: adds ASan flags to cc-flags, stub-cc-flags,
-    and cc-link-flags (preserving existing flags like -I, -D, -framework)
+The script uses two mechanisms:
+  - Package config patching: adds ASan flags to cc-flags and stub-cc-flags
+    (preserving existing flags like -I, -D). stub-cc-flags is patched on all
+    packages; cc-flags is patched only on entry packages (is-main or test).
   - mimalloc disable: replaces libmoonbitrun.o with a dummy empty object so
     ASan can intercept all memory allocations
 
+On macOS, MOON_CC/MOON_AR env vars are set to use Homebrew LLVM (Apple Clang
+lacks LeakSanitizer). On other platforms the system compiler is used directly.
+
 Both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format) are supported.
-All specified `--pkg` files are patched (both library and is-main packages).
 """
 
 import argparse
@@ -32,7 +32,6 @@ from typing import Any
 
 
 ASAN_COMPILE_FLAGS = "-g -fsanitize=address -fno-omit-frame-pointer"
-ASAN_LINK_FLAG = "-fsanitize=address"
 
 
 def _find_brew_clang() -> str | None:
@@ -57,16 +56,12 @@ def _find_brew_clang() -> str | None:
     return None
 
 
-def macos_flags() -> dict[str, str]:
+def macos_flags() -> tuple[str, dict[str, str]]:
     """Try Homebrew LLVM first (supports LSan), fall back to system clang."""
     # Prefer Homebrew LLVM: supports both ASan and LSan (leak detection)
     brew_clang = _find_brew_clang()
     if brew_clang:
-        return {
-            "cc": brew_clang,
-            "cc-flags": ASAN_COMPILE_FLAGS,
-            "detect_leaks": "1",
-        }
+        return (brew_clang, {"cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "1"})
 
     # Fall back to system clang (Xcode 15+ supports ASan but NOT LSan)
     system_cc = shutil.which("cc") or "/usr/bin/cc"
@@ -77,31 +72,28 @@ def macos_flags() -> dict[str, str]:
         capture_output=True,
     )
     if result.returncode == 0:
-        return {
-            "cc": system_cc,
-            "cc-flags": ASAN_COMPILE_FLAGS,
-            "detect_leaks": "0",
-        }
+        return (system_cc, {"cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "0"})
 
     raise Exception(
         "No ASan-capable compiler found. Install Homebrew LLVM: brew install llvm"
     )
 
 
-def linux_flags() -> dict[str, str]:
-    return {"cc": "gcc", "cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "1"}
+def linux_flags() -> tuple[str, dict[str, str]]:
+    cc = shutil.which("cc") or "gcc"
+    return (cc, {"cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "1"})
 
 
-def windows_flags() -> dict[str, str]:
-    return {
-        "cc": "cl",
+def windows_flags() -> tuple[str, dict[str, str]]:
+    return ("cl", {
         "cc-flags": "/Z7 /fsanitize=address",
         "stub-cc-flags": "/Z7 /fsanitize=address",
         "detect_leaks": "0",
-    }
+    })
 
 
-def get_flags() -> dict[str, str]:
+def get_flags() -> tuple[str, dict[str, str]]:
+    """Return (cc_path, flags_dict). cc_path is used for mimalloc and macOS MOON_CC."""
     system = platform.system()
     if system == "Darwin":
         return macos_flags()
@@ -214,12 +206,12 @@ def resolve_pkg_path(repo_root: Path, pkg_arg: str) -> Path:
 
 
 def patch_link_native_json(
-    moon_pkg: dict[str, Any], flags: dict[str, str], pkg_path: Path
+    moon_pkg: dict[str, Any], flags: dict[str, str], pkg_path: Path,
+    is_entry: bool,
 ) -> None:
     """Patch link.native in a parsed JSON dict with ASan flags.
 
-    Only patches compile/link FLAGS (cc-flags, stub-cc-flags, cc-link-flags).
-    The compiler path itself is set via MOON_CC/MOON_AR env vars.
+    Always patches stub-cc-flags. Only patches cc-flags when is_entry is True.
     """
     link = moon_pkg.get("link")
     if link is None:
@@ -234,8 +226,8 @@ def patch_link_native_json(
     elif not isinstance(native, dict):
         raise ValueError(f'Expected "link.native" object in {pkg_path}')
 
-    # cc-flags: set ASan compile flags for MoonBit-generated C
-    if "cc-flags" in flags:
+    # cc-flags: set ASan compile flags for MoonBit-generated C (entry packages only)
+    if is_entry and "cc-flags" in flags:
         native["cc-flags"] = flags["cc-flags"]
 
     # stub-cc-flags: append ASan flags to existing value (preserving -I, -D, etc.)
@@ -248,17 +240,10 @@ def patch_link_native_json(
     else:
         native["stub-cc-flags"] = ASAN_COMPILE_FLAGS
 
-    # cc-link-flags: prepend -fsanitize=address (preserving -framework, -l, etc.)
-    existing_link_flags = native.get("cc-link-flags", "")
-    if existing_link_flags:
-        native["cc-link-flags"] = ASAN_LINK_FLAG + " " + existing_link_flags
-    else:
-        native["cc-link-flags"] = ASAN_LINK_FLAG
-
     link["native"] = native
 
 
-def patch_json_file(pkg_path: Path, flags: dict[str, str]) -> str:
+def patch_json_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> str:
     """Patch a moon.pkg.json file. Returns the patched text."""
     text = pkg_path.read_text(encoding="utf-8")
     try:
@@ -268,7 +253,7 @@ def patch_json_file(pkg_path: Path, flags: dict[str, str]) -> str:
     if not isinstance(moon_pkg, dict):
         sys.exit(f"Package file is not a JSON object: {pkg_path}")
     try:
-        patch_link_native_json(moon_pkg, flags, pkg_path)
+        patch_link_native_json(moon_pkg, flags, pkg_path, is_entry)
     except ValueError as error:
         sys.exit(str(error))
     return json.dumps(moon_pkg, indent=2) + "\n"
@@ -323,11 +308,10 @@ def _replace_or_insert_in_native(text: str, key: str, value: str) -> str:
     return text[:closing_brace] + insertion + text[closing_brace:]
 
 
-def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
+def patch_dsl_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> str:
     """Patch a moon.pkg DSL file using text manipulation. Returns the patched text.
 
-    Only patches compile/link FLAGS (cc-flags, stub-cc-flags, cc-link-flags).
-    The compiler path itself is set via MOON_CC/MOON_AR env vars.
+    Always patches stub-cc-flags. Only patches cc-flags when is_entry is True.
     """
     text = pkg_path.read_text(encoding="utf-8")
 
@@ -337,8 +321,8 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
             "Cannot patch ASan flags without an existing link.native section."
         )
 
-    # 1. cc-flags: set ASan compile flags for MoonBit-generated C
-    if "cc-flags" in flags:
+    # 1. cc-flags: set ASan compile flags for MoonBit-generated C (entry packages only)
+    if is_entry and "cc-flags" in flags:
         text = _replace_or_insert_in_native(text, "cc-flags", flags["cc-flags"])
 
     # 2. stub-cc-flags: append ASan flags (or override on Windows)
@@ -357,15 +341,6 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
                 text, "stub-cc-flags", ASAN_COMPILE_FLAGS
             )
 
-    # 3. cc-link-flags: prepend -fsanitize=address
-    m = re.search(r'"cc-link-flags"\s*:\s*"([^"]*)"', text)
-    if m:
-        existing = m.group(1)
-        new_value = f"{ASAN_LINK_FLAG} {existing}" if existing else ASAN_LINK_FLAG
-        text = _replace_or_insert_in_native(text, "cc-link-flags", new_value)
-    else:
-        text = _replace_or_insert_in_native(text, "cc-link-flags", ASAN_LINK_FLAG)
-
     return text
 
 
@@ -377,6 +352,24 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
 def is_dsl_format(pkg_path: Path) -> bool:
     """Check if a package file uses moon.pkg DSL format (vs moon.pkg.json)."""
     return pkg_path.name == "moon.pkg"
+
+
+def _is_entry_package(pkg_path: Path) -> bool:
+    """Check if package is an entry package (is-main or has test files)."""
+    text = pkg_path.read_text(encoding="utf-8")
+    # Check is-main in config
+    if is_dsl_format(pkg_path):
+        if re.search(r'"is-main"\s*:\s*true', text):
+            return True
+    else:
+        data = json.loads(text)
+        if data.get("is-main"):
+            return True
+    # Check for *_test.mbt files in the same directory
+    pkg_dir = pkg_path.parent
+    if list(pkg_dir.glob("*_test.mbt")):
+        return True
+    return False
 
 
 def main():
@@ -394,7 +387,7 @@ def main():
         help=(
             "Relative path to moon.pkg or moon.pkg.json (repeatable). "
             "Either format is auto-detected. "
-            "Must include ALL packages with native-stub or cc-link-flags."
+            "Must include ALL packages with native-stub and all entry packages (is-main/test)."
         ),
     )
     parser.add_argument(
@@ -428,9 +421,8 @@ def main():
             "No --pkg arguments provided. Specify at least one moon.pkg or moon.pkg.json."
         )
 
-    flags = get_flags()
+    cc_path, flags = get_flags()
     detect_leaks = flags.pop("detect_leaks", "1")
-    cc_path = flags.pop("cc")
     print(f"Platform: {platform.system()}")
     print(f"ASan compiler: {cc_path}")
     print(f"ASan compile flags: {flags['cc-flags']}")
@@ -449,11 +441,10 @@ def main():
         mimalloc_backup = disable_mimalloc(cc_path)
 
     # Build environment
-    # MOON_CC overrides both cc and stub-cc via resolve_cc() in moon.
-    # MOON_AR must be set together with MOON_CC (ignored without it).
     env = os.environ.copy()
-    env["MOON_CC"] = cc_path
-    if platform.system() != "Windows":
+    # MOON_CC/MOON_AR only needed on macOS (Apple Clang lacks LSan)
+    if platform.system() == "Darwin":
+        env["MOON_CC"] = cc_path
         env["MOON_AR"] = "/usr/bin/ar"
     asan_opts = f"detect_leaks={detect_leaks}:fast_unwind_on_malloc=0"
     env["ASAN_OPTIONS"] = asan_opts
@@ -463,13 +454,15 @@ def main():
 
     try:
         for pkg_path in pkg_paths:
+            is_entry = _is_entry_package(pkg_path)
             if is_dsl_format(pkg_path):
-                patched = patch_dsl_file(pkg_path, flags)
+                patched = patch_dsl_file(pkg_path, flags, is_entry)
             else:
-                patched = patch_json_file(pkg_path, flags)
+                patched = patch_json_file(pkg_path, flags, is_entry)
             pkg_path.write_text(patched, encoding="utf-8")
             fmt = "DSL" if is_dsl_format(pkg_path) else "JSON"
-            print(f"Patched ({fmt}): {display_path(pkg_path, repo_root)}")
+            kind = "entry" if is_entry else "library"
+            print(f"Patched ({fmt}, {kind}): {display_path(pkg_path, repo_root)}")
 
         result = subprocess.run(
             ["moon", "test", "--target", "native", "-v"],

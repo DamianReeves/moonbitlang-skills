@@ -26,7 +26,7 @@ Single package:
 python3 scripts/run-asan.py --repo-root <project-root> --pkg moon.pkg
 ```
 
-Multiple packages (include ALL packages with `native-stub` or `cc-link-flags`):
+Multiple packages (include ALL packages with `native-stub` and all entry packages (`is-main`/test)):
 
 ```bash
 python3 scripts/run-asan.py \
@@ -43,7 +43,7 @@ format automatically.
 
 ## How It Works
 
-The script combines three mechanisms. Understanding them is also useful for
+The script combines two mechanisms. Understanding them is also useful for
 manual setup or debugging.
 
 ### 1. Disable mimalloc
@@ -53,36 +53,18 @@ intercepts `malloc`/`free`, preventing ASan from tracking allocations. The
 script replaces `libmoonbitrun.o` with an empty compiled object and restores
 it afterward. Pass `--no-disable-mimalloc` to skip this step.
 
-### 2. Compiler override via `MOON_CC` + `MOON_AR`
+### 2. Package config patching
 
-The script sets `MOON_CC` to an ASan-capable compiler and `MOON_AR` to the
-system archiver. This overrides both `cc` and `stub-cc` via moon's
-`resolve_cc()`, ensuring all C code (MoonBit-generated and stubs) uses the
-same compiler and ASan runtime.
-
-Key constraints:
-
-- `MOON_CC` accepts a compiler **path only** (e.g., `/usr/bin/cc`). Flags
-  like `-fsanitize=address` cannot be included — moon treats the value as a
-  single executable path.
-- `MOON_AR` is **ignored** unless `MOON_CC` is also set.
-- On macOS, moon derives `ar` from the compiler path. Homebrew LLVM has
-  `llvm-ar` but not `ar`, so `MOON_AR=/usr/bin/ar` is needed.
-
-### 3. Package config patching
-
-Since `MOON_CC` cannot carry flags, ASan flags must be injected into package
-config files. The script snapshots, patches, and restores them in a
-`try/finally` block:
+ASan flags must be injected into package config files. The script snapshots,
+patches, and restores them in a `try/finally` block:
 
 | Field | How it's patched | Why |
 |---|---|---|
 | `cc-flags` | Set to `-g -fsanitize=address -fno-omit-frame-pointer` | Instruments MoonBit-generated C code |
 | `stub-cc-flags` | **Append** the same flags to existing value | Instruments C stub files (preserves `-I`, `-D` flags) |
-| `cc-link-flags` | **Prepend** `-fsanitize=address` to existing value | Links ASan runtime (preserves `-framework`, `-l` flags) |
 
-Patch ALL packages with `native-stub` or `cc-link-flags` — both library and
-`is-main`/test packages.
+Patch `stub-cc-flags` on all packages with `native-stub` (unconditionally safe to
+patch all packages). Patch `cc-flags` on all entry packages (`is-main` or test).
 
 ### Environment variables
 
@@ -107,9 +89,20 @@ automatically. Install with `brew install llvm`.
 **System clang (Xcode 15+)** (fallback) — supports ASan but **not** LSan.
 Leak detection is disabled (`detect_leaks=0`).
 
-On macOS, `MOON_CC`/`MOON_AR` are essential to avoid ASan runtime version
-mismatches between system clang and Homebrew LLVM
-(`___asan_version_mismatch_check_apple_clang_*` linker errors).
+**Compiler override via `MOON_CC` + `MOON_AR`:** On macOS, the script sets
+`MOON_CC` and `MOON_AR` to use Homebrew LLVM explicitly, because Apple Clang
+does not support LeakSanitizer. This override is only needed on macOS — on
+Linux, the system compiler supports ASan natively and when `cc-flags` is
+present, tcc is disabled automatically.
+
+Key constraints:
+
+- `MOON_CC` accepts a compiler **path only** (e.g., `/opt/homebrew/opt/llvm/bin/clang`).
+  Flags like `-fsanitize=address` cannot be included — moon treats the value
+  as a single executable path.
+- `MOON_AR` is **ignored** unless `MOON_CC` is also set.
+- On macOS, moon derives `ar` from the compiler path. Homebrew LLVM has
+  `llvm-ar` but not `ar`, so `MOON_AR=/usr/bin/ar` is needed.
 
 ### Linux
 

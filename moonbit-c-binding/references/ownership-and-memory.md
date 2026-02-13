@@ -18,6 +18,11 @@ without an ownership annotation is deprecated — new code should use
 struct wrappers): use `#owned` to transfer ownership to C. C must call
 `moonbit_decref()` when done.
 
+**Objects allocated in C** via `moonbit_make_external_object`,
+`moonbit_make_bytes`, etc.: the C code owns the newly created object. It must
+either return it to MoonBit (transferring ownership) or call
+`moonbit_decref()` when done. Treat these as `#owned` from the C side.
+
 ## Operation Tables
 
 What refcount operations are required for each action on a parameter:
