@@ -96,7 +96,7 @@ options(
 
 > **Warning — `cc`/`cc-flags` portability:** Setting `cc` disables TCC for debug builds. Setting `cc-flags` with `-I`/`-L` breaks Windows portability. Only set these for system libraries.
 
-**Including library sources:** All files in `"native-stub"` must be in the same directory as `moon.pkg`. For details on flattening C library sources, see @references/amalgamation-build.md. For more `moon.pkg` configuration examples, see @references/c-stub-patterns.md.
+**Including library sources:** All files in `"native-stub"` must be in the same directory as `moon.pkg`. For inclusion strategies (flattening, header-only, system library linking), see @references/amalgamation-build.md.
 
 ### Phase 2: FFI Layer
 
@@ -195,7 +195,18 @@ void *moonbit_settings_new(void) {
 struct Settings(Bytes)  // backed by GC-managed Bytes, no finalizer
 ```
 
-For detailed C stub patterns and `moonbit.h` API reference, see @references/c-stub-patterns.md.
+**`moonbit.h` core API:**
+
+| API | Purpose |
+|---|---|
+| `moonbit_make_external_object(finalizer, size)` | GC-tracked object with cleanup finalizer |
+| `moonbit_make_bytes(len, init)` | GC-managed byte array (MoonBit `Bytes`) |
+| `moonbit_incref(ptr)` | Prevent GC collection of C-held object |
+| `moonbit_decref(ptr)` | Release C's reference (pair with incref) |
+| `Moonbit_array_length(arr)` | Length of GC-managed array or Bytes |
+| `MOONBIT_FFI_EXPORT` | Required macro on all exported functions |
+
+For the full API, read `$MOON_HOME/lib/moonbit.h` (default `MOON_HOME` is `~/.moon`).
 
 ### Phase 3: MoonBit API
 
@@ -288,8 +299,7 @@ See @references/asan-validation.md for details.
 
 ## References
 
-@references/c-stub-patterns.md
 @references/ownership-and-memory.md
 @references/callbacks-and-external-objects.md
-@references/asan-validation.md
 @references/amalgamation-build.md
+@references/asan-validation.md

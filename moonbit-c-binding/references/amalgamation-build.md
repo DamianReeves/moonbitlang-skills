@@ -1,12 +1,46 @@
-# Amalgamation Build: Flattening C Library Sources
+# Including C Library Sources
 
-How to prepare nested C library source trees for MoonBit native builds using `prepare.py` scripts.
+How to include C library sources in MoonBit native builds.
 
-## 1. Why Flattening Is Needed
+## 1. Inclusion Strategies
+
+All files listed in `"native-stub"` must be in the same directory as `moon.pkg`.
+Choose the strategy that matches your library:
+
+| Strategy | When to use | Example |
+|---|---|---|
+| **Flatten + native-stub** | Library has nested source tree | tree-sitter, libuv |
+| **Header-only** | Library is a single `.h` with `#define IMPL` | stb_image, miniaudio |
+| **System library linking** | Pre-built library installed on system | LLVM, OpenSSL |
+
+**Header-only libraries:** `#define` the implementation macro and `#include` the header in your stub file. No flattening needed.
+
+```c
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include <moonbit.h>
+```
+
+**System libraries:** Include only headers in the stub and supply linker flags in `moon.pkg`:
+
+```moonbit
+link(
+  native(
+    "cc-flags": "-I/path/to/include",
+    "cc-link-flags": "-L/path/to/lib -lmylib",
+  )
+)
+```
+
+> **Portability warning:** `-I`/`-L`/`-l` flags are GCC/Clang conventions. MSVC's `cl.exe` does not accept them.
+
+**Nested source trees** need flattening — see below.
+
+## 2. Why Flattening Is Needed
 
 The `moon` toolchain compiles `native-stub` files from the package directory only — it does not recurse into subdirectories. C libraries with nested source trees (e.g., `src/unix/async.c`, `lib/src/parser.c`) cannot be used directly. Their sources must be **flattened** into the same directory as `moon.pkg` before building.
 
-## 2. The `#` Filename Convention
+## 3. The `#` Filename Convention
 
 When flattening, replace `/` with `#` to preserve the original path in the filename:
 
@@ -21,7 +55,7 @@ The `#` character has no special meaning to the `moon` toolchain — these are l
 
 The prefix (e.g., `tree-sitter`, `uv`) is the library name, set once when creating the `Project` object.
 
-## 3. The `prepare.py` Pattern
+## 4. The `prepare.py` Pattern
 
 Real projects share a common `Project` class that handles mangling, include rewriting, and conditional compilation. Here is a walkthrough of each method.
 
@@ -126,7 +160,7 @@ def configure(project: Project):
         project.copy(source=Path(source), condition="!defined(_WIN32)")
 ```
 
-## 4. Minimal Example
+## 5. Minimal Example
 
 For a library with a single amalgamated source file (e.g., tree-sitter), the script is short:
 
@@ -159,7 +193,7 @@ MOONBIT_FFI_EXPORT
 void *moonbit_ts_parser_new(void) { /* ... */ }
 ```
 
-## 5. Advanced: Platform-Conditional Sources
+## 6. Advanced: Platform-Conditional Sources
 
 For cross-platform libraries like libuv, different source files are needed for each OS. The `condition` parameter wraps file contents in preprocessor guards, so all platform variants can coexist in a single `native-stub` list.
 
@@ -222,7 +256,7 @@ The resulting file `uv#src#win#async.c` on disk looks like:
 
 This way, `moon` compiles all `.c` files on every platform, but the preprocessor guards ensure only the relevant code is included.
 
-## 6. Auto-Updating `moon.pkg`
+## 7. Auto-Updating `moon.pkg`
 
 When a library has many source files, manually maintaining the `native-stub` array is error-prone. The `update_moon_pkg_json()` pattern programmatically writes it after copying:
 
@@ -251,7 +285,7 @@ update_moon_pkg_json(project, Path("src") / "moon.pkg")
 
 The `project.copied` set tracks every file written by `copy()`, so the `native-stub` list is always in sync with the actual files on disk.
 
-## 7. Alternative: Flat Libraries
+## 8. Alternative: Flat Libraries
 
 Some C libraries (e.g., Lua) already have a flat source directory with no subdirectories. In that case, no mangling is needed — just copy `.c` and `.h` files directly:
 
