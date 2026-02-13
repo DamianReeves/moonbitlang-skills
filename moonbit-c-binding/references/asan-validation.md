@@ -26,7 +26,7 @@ Single package:
 python3 scripts/run-asan.py --repo-root <project-root> --pkg moon.pkg
 ```
 
-Multiple packages (include ALL packages with `native-stub` and all entry packages (`is-main`/test)):
+Multiple packages:
 
 ```bash
 python3 scripts/run-asan.py \
@@ -38,6 +38,13 @@ python3 scripts/run-asan.py \
 The `--pkg` argument accepts both `moon.pkg` (DSL format) and `moon.pkg.json`
 (JSON format). If the specified file doesn't exist, the script tries the other
 format automatically.
+
+Note for multiple packages, you need to include all packages with `native-stub`
+and all entry packages. A package is an entry package if:
+
+1. It is configured to be a main package, that is `is-main` set to true in
+   `moon.pkg`/`moon.pkg.json`.
+2. It contains tests.
 
 ---
 
@@ -128,7 +135,7 @@ cl.exe dummy_libmoonbitrun.c /c /Fo: $out_path
 macOS system libraries (libobjc, libdispatch, dyld) have known leaks that
 trigger false positives. Place `.lsan-suppressions` at the project root:
 
-```
+```plaintext
 leak:_libSystem_initializer
 leak:_objc_init
 leak:libdispatch
