@@ -17,23 +17,8 @@ silently corrupt memory or leak resources. ASan catches them at runtime:
 
 ## Quick Start
 
-### Using the Bundled Script (Recommended)
-
-The skill includes `scripts/run-asan.py` which automates the full workflow:
-
-1. Detect platform and find appropriate clang with ASan support. On macOS,
-   prefers Homebrew LLVM (supports both ASan and LSan leak detection), falls
-   back to system clang (ASan only). On Linux, uses gcc.
-2. Set `MOON_CC` and `MOON_AR` env vars to override the compiler/archiver for
-   both MoonBit-generated C and stub C compilation. This avoids ASan runtime
-   version mismatches between system clang and Homebrew LLVM.
-3. Snapshot and patch target package files with ASan flags in `cc-flags`,
-   `stub-cc-flags` (appended to existing flags), and `cc-link-flags` (prepended
-   to existing flags).
-4. Run `moon test --target native -v` with ASan environment variables.
-5. Restore original files in `try/finally`, regardless of test outcome.
-
-Both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format) are supported. The script auto-detects the format based on filename and patches accordingly — DSL files are patched using text manipulation, JSON files using `json` module parsing.
+The skill includes `scripts/run-asan.py` which automates the full workflow.
+It also works in CI environments.
 
 Single package:
 
@@ -50,134 +35,104 @@ python3 scripts/run-asan.py \
   --pkg main/moon.pkg
 ```
 
-The `--pkg` argument resolves either format automatically: passing
-`moon.pkg.json` finds `moon.pkg` if the JSON file doesn't exist, and vice versa.
+The `--pkg` argument accepts both `moon.pkg` (DSL format) and `moon.pkg.json`
+(JSON format). If the specified file doesn't exist, the script tries the other
+format automatically.
 
-### Manual Approach
+---
 
-The script uses two mechanisms that can also be applied manually:
+## How It Works
 
-**1. `MOON_CC` + `MOON_AR` env vars** — override the compiler and archiver:
+The script combines three mechanisms. Understanding them is also useful for
+manual setup or debugging.
 
-```bash
-MOON_CC=/opt/homebrew/opt/llvm/bin/clang MOON_AR=/usr/bin/ar moon test --target native -v
-```
+### 1. Disable mimalloc
 
-`MOON_CC` overrides both `cc` and `stub-cc` via moon's `resolve_cc()`. This
-ensures all C code (MoonBit-generated and stubs) uses the same compiler and ASan
-runtime, avoiding version mismatch errors. `MOON_AR` **must** be set together
-with `MOON_CC` — it is ignored without it.
+MoonBit bundles mimalloc as its allocator via `libmoonbitrun.o`. mimalloc
+intercepts `malloc`/`free`, preventing ASan from tracking allocations. The
+script replaces `libmoonbitrun.o` with an empty compiled object and restores
+it afterward. Pass `--no-disable-mimalloc` to skip this step.
 
-> **Warning:** `MOON_CC` is a compiler path only (e.g., `/usr/bin/cc`). Do NOT
-> include flags (e.g., `MOON_CC="clang -fsanitize=address"` will fail — moon
-> treats the value as a single executable path).
+### 2. Compiler override via `MOON_CC` + `MOON_AR`
 
-**2. Package config patching** — add ASan flags:
+The script sets `MOON_CC` to an ASan-capable compiler and `MOON_AR` to the
+system archiver. This overrides both `cc` and `stub-cc` via moon's
+`resolve_cc()`, ensuring all C code (MoonBit-generated and stubs) uses the
+same compiler and ASan runtime.
 
-| Field | What to set | Why |
+Key constraints:
+
+- `MOON_CC` accepts a compiler **path only** (e.g., `/usr/bin/cc`). Flags
+  like `-fsanitize=address` cannot be included — moon treats the value as a
+  single executable path.
+- `MOON_AR` is **ignored** unless `MOON_CC` is also set.
+- On macOS, moon derives `ar` from the compiler path. Homebrew LLVM has
+  `llvm-ar` but not `ar`, so `MOON_AR=/usr/bin/ar` is needed.
+
+### 3. Package config patching
+
+Since `MOON_CC` cannot carry flags, ASan flags must be injected into package
+config files. The script snapshots, patches, and restores them in a
+`try/finally` block:
+
+| Field | How it's patched | Why |
 |---|---|---|
-| `cc-flags` | `"-g -fsanitize=address"` | Instruments MoonBit-generated C code |
-| `stub-cc-flags` | Append `-g -fsanitize=address` to existing value | Instruments C stub files (preserves `-I`, `-D` flags) |
-| `cc-link-flags` | Prepend `-fsanitize=address` to existing value | Links ASan runtime (preserves `-framework`, `-l` flags) |
+| `cc-flags` | Set to `-g -fsanitize=address -fno-omit-frame-pointer` | Instruments MoonBit-generated C code |
+| `stub-cc-flags` | **Append** the same flags to existing value | Instruments C stub files (preserves `-I`, `-D` flags) |
+| `cc-link-flags` | **Prepend** `-fsanitize=address` to existing value | Links ASan runtime (preserves `-framework`, `-l` flags) |
 
-**Important:** Patch ALL packages that produce executables — both library packages (with `native-stub`) and `is-main`/test packages (with `cc-link-flags`). Always restore originals in a `finally` block.
+Patch ALL packages with `native-stub` or `cc-link-flags` — both library and
+`is-main`/test packages.
 
----
+### Environment variables
 
-## 2. GitHub Actions Workflow
+The script sets:
 
-For CI integration, the script handles everything automatically. Alternatively,
-you can set up the steps manually. Both approaches are shown below.
-
-### Using `run-asan.py` (Recommended)
-
-```yaml
-sanitizer-check:
-  runs-on: ubuntu-latest
-  timeout-minutes: 10
-  steps:
-    - uses: actions/checkout@v4
-
-    - name: install moonbit
-      run: |
-        curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-        echo "$HOME/.moon/bin" >> $GITHUB_PATH
-
-    - name: moon update
-      run: moon update
-
-    - name: run tests with ASan
-      run: |
-        python3 scripts/run-asan.py \
-          --repo-root . \
-          --pkg moon.pkg \
-          --pkg main/moon.pkg
-```
-
-The script automatically handles mimalloc disable, compiler selection, flag
-patching, `ASAN_OPTIONS`, and cleanup. On Linux CI, system `gcc` is used with
-full leak detection support.
-
-### Manual Approach
-
-Without the script, you must perform all three steps yourself:
-
-1. **Disable mimalloc**: Replace `libmoonbitrun.o` with an empty object. MoonBit bundles mimalloc as its allocator, which intercepts `malloc`/`free` and prevents ASan from tracking allocations.
-
-2. **Patch package config files**: Add ASan flags to every `moon.pkg` (or `moon.pkg.json`) that has `native-stub` or `cc-link-flags`. There is no `MOON_CFLAGS` env var — `MOON_CC` only accepts a compiler path, so flags must go in the package config:
-
-   | Field | What to set | Why |
-   |---|---|---|
-   | `cc-flags` | `"-g -fsanitize=address -fno-omit-frame-pointer"` | Instruments MoonBit-generated C code |
-   | `stub-cc-flags` | Append `-g -fsanitize=address -fno-omit-frame-pointer` | Instruments C stub files (preserve existing `-I`, `-D` flags) |
-   | `cc-link-flags` | Prepend `-fsanitize=address` | Links ASan runtime (preserve existing `-framework`, `-l` flags) |
-
-   On macOS, also set `MOON_CC` and `MOON_AR` to avoid ASan runtime version mismatches (see Platform Setup section).
-
-3. **Run tests** with `ASAN_OPTIONS`:
-   ```bash
-   ASAN_OPTIONS="detect_leaks=1:fast_unwind_on_malloc=0" moon test --target native -v
-   ```
-
-4. **Restore** all modified package files and `libmoonbitrun.o` afterward.
-
-Because the manual approach requires patching and restoring multiple files, the script is strongly recommended — especially in CI where cleanup must happen even on test failure.
-
-For Windows CI, use `cl.exe` to compile the dummy object:
-
-```yaml
-- name: disable mimalloc
-  run: |
-    echo "" >dummy_libmoonbitrun.c
-    $out_path = Convert-Path ~/.moon/lib/libmoonbitrun.o
-    cl.exe dummy_libmoonbitrun.c /c /Fo: $out_path
-```
+- `ASAN_OPTIONS="detect_leaks=<0|1>:fast_unwind_on_malloc=0"` — enables ASan
+  and (where supported) LSan leak detection. `fast_unwind_on_malloc=0`
+  produces more accurate stack traces.
+- `LSAN_OPTIONS="suppressions=<path>"` — if a `.lsan-suppressions` file exists
+  at the project root, it is passed to LSan (see Leak Suppressions below).
 
 ---
 
-## 3. Platform Setup
+## Platform Setup
 
 ### macOS
 
-**Homebrew LLVM** is preferred because it supports both ASan and LSan (leak detection). The script probes several versioned formulae automatically (`llvm`, `llvm@18`, `llvm@19`, `llvm@15`, `llvm@13`). Install with `brew install llvm`.
+**Homebrew LLVM** (preferred) — supports both ASan and LSan (leak detection).
+The script probes `llvm`, `llvm@18`, `llvm@19`, `llvm@15`, `llvm@13`
+automatically. Install with `brew install llvm`.
 
-**System clang (Xcode 15+)** is used as a fallback if Homebrew LLVM is not installed. System clang supports ASan but **not** LSan — leak detection will be disabled (`detect_leaks=0`).
+**System clang (Xcode 15+)** (fallback) — supports ASan but **not** LSan.
+Leak detection is disabled (`detect_leaks=0`).
 
-**MOON_CC + MOON_AR:** The script sets `MOON_CC` to the chosen clang and `MOON_AR=/usr/bin/ar`. This is necessary because:
-- `MOON_CC` overrides both `cc` and `stub-cc` via moon's `resolve_cc()`, ensuring all C code uses the same ASan runtime (avoids `___asan_version_mismatch_check_apple_clang_*` linker errors)
-- `MOON_AR` must be set with `MOON_CC` (ignored without it). Moon derives `ar` from the compiler path; Homebrew LLVM has `llvm-ar` but not `ar`, so `MOON_AR=/usr/bin/ar` is needed
-
-**Leak suppressions:** macOS system libraries (libobjc, libdispatch, dyld) have known leaks. Place a `.lsan-suppressions` file at the project root to suppress them.
+On macOS, `MOON_CC`/`MOON_AR` are essential to avoid ASan runtime version
+mismatches between system clang and Homebrew LLVM
+(`___asan_version_mismatch_check_apple_clang_*` linker errors).
 
 ### Linux
 
-System `gcc` or `clang` on most distributions includes ASan out of the box. On minimal images, install `libasan` (e.g., `apt-get install libasan6`).
+System `gcc` or `clang` on most distributions includes ASan out of the box.
+On minimal images, install `libasan` (e.g., `apt-get install libasan6`).
+
+### Windows
+
+Use `cl.exe` with `/Z7 /fsanitize=address` for compilation. To disable
+mimalloc manually:
+
+```powershell
+echo "" >dummy_libmoonbitrun.c
+$out_path = Convert-Path ~/.moon/lib/libmoonbitrun.o
+cl.exe dummy_libmoonbitrun.c /c /Fo: $out_path
+```
 
 ---
 
-## 4. Leak Suppressions
+## Leak Suppressions
 
-Place `.lsan-suppressions` at your project root to ignore known system library leaks:
+macOS system libraries (libobjc, libdispatch, dyld) have known leaks that
+trigger false positives. Place `.lsan-suppressions` at the project root:
 
 ```
 leak:_libSystem_initializer
@@ -185,15 +140,16 @@ leak:_objc_init
 leak:libdispatch
 ```
 
-Each `leak:<pattern>` is matched against stack traces. If any frame matches, the leak
-is suppressed. The path passed to `LSAN_OPTIONS` **must be absolute**.
+Each `leak:<pattern>` is matched against stack traces. If any frame matches,
+the leak is suppressed. The script passes the absolute path to
+`LSAN_OPTIONS` automatically.
 
-Only suppress leaks from system/third-party code you do not control. Never suppress
-leaks in your own C stub functions.
+Only suppress leaks from system/third-party code you do not control. Never
+suppress leaks in your own C stub functions.
 
 ---
 
-## 5. Interpreting Results
+## Interpreting Results
 
 ### heap-use-after-free
 
