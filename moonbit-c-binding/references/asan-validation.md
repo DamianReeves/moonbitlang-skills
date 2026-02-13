@@ -21,10 +21,17 @@ silently corrupt memory or leak resources. ASan catches them at runtime:
 
 The skill includes `scripts/run-asan.py` which automates the full workflow:
 
-1. Detect platform and find appropriate clang with ASan support (system clang on modern macOS, Homebrew LLVM as fallback, gcc on Linux).
-2. Snapshot and patch target package files with ASan flags in THREE places: `cc`/`cc-flags` (MoonBit-generated C), `stub-cc-flags` (C stubs), and `cc-link-flags` (linker).
-3. Run `moon test --target native -v` with ASan environment variables.
-4. Restore original files in `try/finally`, regardless of test outcome.
+1. Detect platform and find appropriate clang with ASan support. On macOS,
+   prefers Homebrew LLVM (supports both ASan and LSan leak detection), falls
+   back to system clang (ASan only). On Linux, uses gcc.
+2. Set `MOON_CC` and `MOON_AR` env vars to override the compiler/archiver for
+   both MoonBit-generated C and stub C compilation. This avoids ASan runtime
+   version mismatches between system clang and Homebrew LLVM.
+3. Snapshot and patch target package files with ASan flags in `cc-flags`,
+   `stub-cc-flags` (appended to existing flags), and `cc-link-flags` (prepended
+   to existing flags).
+4. Run `moon test --target native -v` with ASan environment variables.
+5. Restore original files in `try/finally`, regardless of test outcome.
 
 Both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format) are supported. The script auto-detects the format based on filename and patches accordingly — DSL files are patched using text manipulation, JSON files using `json` module parsing.
 
@@ -43,27 +50,44 @@ python3 scripts/run-asan.py \
   --pkg main/moon.pkg
 ```
 
-The `--pkg` argument resolves either format automatically: passing `moon.pkg.json` finds `moon.pkg` if the JSON file doesn't exist, and vice versa.
+The `--pkg` argument resolves either format automatically: passing
+`moon.pkg.json` finds `moon.pkg` if the JSON file doesn't exist, and vice versa.
 
-### Manual Approach: Patching Package Config
+### Manual Approach
 
-If not using the script, temporarily patch the package config. ASan flags must be added to **three** fields inside `link.native`:
+The script uses two mechanisms that can also be applied manually:
+
+**1. `MOON_CC` + `MOON_AR` env vars** — override the compiler and archiver:
+
+```bash
+MOON_CC=/opt/homebrew/opt/llvm/bin/clang MOON_AR=/usr/bin/ar moon test --target native -v
+```
+
+`MOON_CC` overrides both `cc` and `stub-cc` via moon's `resolve_cc()`. This
+ensures all C code (MoonBit-generated and stubs) uses the same compiler and ASan
+runtime, avoiding version mismatch errors. `MOON_AR` **must** be set together
+with `MOON_CC` — it is ignored without it.
+
+> **Warning:** `MOON_CC` is a compiler path only (e.g., `/usr/bin/cc`). Do NOT
+> include flags (e.g., `MOON_CC="clang -fsanitize=address"` will fail — moon
+> treats the value as a single executable path).
+
+**2. Package config patching** — add ASan flags:
 
 | Field | What to set | Why |
 |---|---|---|
-| `cc` + `cc-flags` | `"cc": "/usr/bin/cc"`, `"cc-flags": "-g -fsanitize=address"` | Instruments MoonBit-generated C code |
+| `cc-flags` | `"-g -fsanitize=address"` | Instruments MoonBit-generated C code |
 | `stub-cc-flags` | Append `-g -fsanitize=address` to existing value | Instruments C stub files (preserves `-I`, `-D` flags) |
 | `cc-link-flags` | Prepend `-fsanitize=address` to existing value | Links ASan runtime (preserves `-framework`, `-l` flags) |
 
 **Important:** Patch ALL packages that produce executables — both library packages (with `native-stub`) and `is-main`/test packages (with `cc-link-flags`). Always restore originals in a `finally` block.
 
-> **Warning — `MOON_CC` environment variable:** Do NOT use `MOON_CC` with flags (e.g., `MOON_CC="clang -fsanitize=address"`). Moon treats `MOON_CC` as a single executable path, not a command line. Use the `cc` field in package config instead.
-
 ---
 
 ## 2. GitHub Actions Workflow
 
-For CI integration, disable mimalloc (which interferes with ASan) and run tests with `ASAN_OPTIONS`. Example from `moonbitlang/async`:
+For CI integration, disable mimalloc (which interferes with ASan) and run tests
+with `ASAN_OPTIONS`. Example from `moonbitlang/async`:
 
 ```yaml
 sanitizer-check:
@@ -101,6 +125,7 @@ sanitizer-check:
 ```
 
 **Key steps:**
+
 1. **Disable mimalloc**: MoonBit's default allocator conflicts with ASan. Replace `libmoonbitrun.o` with a dummy object.
 2. **Set `ASAN_OPTIONS`**: Use `fast_unwind_on_malloc=0` for more accurate stack traces (slower but clearer).
 3. **Run tests**: `moon test` defaults to native backend if `preferred-target` is set.
@@ -121,13 +146,15 @@ For Windows, use `cl.exe` instead of `gcc`:
 
 ### macOS
 
-**System clang (Xcode 15+)** supports ASan on modern macOS. The bundled script tries system clang first by compiling a test program with `-fsanitize=address`. If that works, no additional installation is needed.
+**Homebrew LLVM** is preferred because it supports both ASan and LSan (leak detection). The script probes several versioned formulae automatically (`llvm`, `llvm@18`, `llvm@19`, `llvm@15`, `llvm@13`). Install with `brew install llvm`.
 
-**Homebrew LLVM** is used as a fallback if system clang doesn't support ASan (older Xcode versions). The script probes several versioned formulae automatically (`llvm`, `llvm@18`, `llvm@19`, `llvm@15`, `llvm@13`).
+**System clang (Xcode 15+)** is used as a fallback if Homebrew LLVM is not installed. System clang supports ASan but **not** LSan — leak detection will be disabled (`detect_leaks=0`).
 
-**Leak detection (LSan)** is **not supported** on macOS with Apple Clang. The script automatically sets `detect_leaks=0` on Darwin. For leak detection, use Linux or Homebrew LLVM's clang.
+**MOON_CC + MOON_AR:** The script sets `MOON_CC` to the chosen clang and `MOON_AR=/usr/bin/ar`. This is necessary because:
+- `MOON_CC` overrides both `cc` and `stub-cc` via moon's `resolve_cc()`, ensuring all C code uses the same ASan runtime (avoids `___asan_version_mismatch_check_apple_clang_*` linker errors)
+- `MOON_AR` must be set with `MOON_CC` (ignored without it). Moon derives `ar` from the compiler path; Homebrew LLVM has `llvm-ar` but not `ar`, so `MOON_AR=/usr/bin/ar` is needed
 
-**MOON_AR** must be set to `/usr/bin/ar` when overriding `cc`. Otherwise moon may look for `ar` in the same prefix as the compiler (e.g., `/opt/homebrew/opt/llvm/bin/ar`), which may not exist.
+**Leak suppressions:** macOS system libraries (libobjc, libdispatch, dyld) have known leaks. Place a `.lsan-suppressions` file at the project root to suppress them.
 
 ### Linux
 

@@ -339,9 +339,12 @@ python3 scripts/run-asan.py \
   --pkg main/moon.pkg
 ```
 
-The script supports both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format). It auto-detects the format, patches ASan flags into `cc`, `cc-flags`, `stub-cc-flags`, and `cc-link-flags`, runs tests, and restores the original files. Pass `--pkg` for ALL packages with `native-stub` or `cc-link-flags`.
-
-> **Warning:** Do NOT use `MOON_CC` with flags (e.g., `MOON_CC="clang -fsanitize=address"`). Moon treats `MOON_CC` as a single executable path. Use the bundled script or patch `cc` in package config instead.
+The script supports both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON
+format). It auto-detects the format, sets `MOON_CC`/`MOON_AR` env vars to
+override the compiler, and patches ASan flags into `cc-flags`, `stub-cc-flags`,
+and `cc-link-flags`. On macOS it prefers Homebrew LLVM (enables leak detection
+via LSan), falling back to system clang (ASan only). Pass `--pkg` for ALL
+packages with `native-stub` or `cc-link-flags`.
 
 See the ASan validation reference for platform setup and troubleshooting.
 

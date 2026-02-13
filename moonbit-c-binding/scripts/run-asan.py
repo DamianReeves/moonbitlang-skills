@@ -2,13 +2,15 @@
 """Run MoonBit native tests with AddressSanitizer.
 
 Snapshots each specified package file (`moon.pkg` DSL or `moon.pkg.json`),
-patches `link.native` with platform ASan compiler settings, runs `moon test`,
-and restores originals in a finally block.
+patches `link.native` with ASan compile/link flags, sets MOON_CC/MOON_AR
+env vars to override the compiler, runs `moon test`, and restores originals
+in a finally block.
 
-The script patches:
-  - `cc-flags`: ASan flags for MoonBit-generated C code
-  - `stub-cc-flags`: appends ASan flags to existing stub compiler flags
-  - `cc-link-flags`: prepends `-fsanitize=address` to existing linker flags
+The script uses two mechanisms:
+  - MOON_CC/MOON_AR env vars: override the compiler and archiver for both
+    MoonBit-generated C and stub C compilation (avoids ASan runtime mismatches)
+  - Package config patching: adds ASan flags to cc-flags, stub-cc-flags,
+    and cc-link-flags (preserving existing flags like -I, -D, -framework)
 
 Both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format) are supported.
 All specified `--pkg` files are patched (both library and is-main packages).
@@ -30,28 +32,14 @@ ASAN_COMPILE_FLAGS = "-g -fsanitize=address"
 ASAN_LINK_FLAG = "-fsanitize=address"
 
 
-def macos_flags() -> dict[str, str]:
-    """Try system clang first, fall back to Homebrew LLVM."""
-    # System clang on modern macOS (Xcode 15+) supports ASan
-    system_cc = shutil.which("cc") or "/usr/bin/cc"
-    result = subprocess.run(
-        [system_cc, "-fsanitize=address", "-x", "c", "-", "-o", "/dev/null"],
-        input="int main(){return 0;}",
-        text=True,
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        return {"cc": system_cc, "cc-flags": ASAN_COMPILE_FLAGS}
-
-    # Fall back to Homebrew LLVM
+def _find_brew_clang() -> str | None:
+    """Find Homebrew LLVM clang, which supports both ASan and LSan."""
     brew = shutil.which("brew")
     if not brew:
         if Path("/opt/homebrew/bin/brew").exists():
             brew = "/opt/homebrew/bin/brew"
         else:
-            raise Exception(
-                "System clang does not support ASan and Homebrew is not installed"
-            )
+            return None
     llvm_opts = ["llvm", "llvm@18", "llvm@19", "llvm@15", "llvm@13"]
     for llvm in llvm_opts:
         try:
@@ -62,22 +50,51 @@ def macos_flags() -> dict[str, str]:
             continue
         clang_path = Path(llvm_prefix) / "bin" / "clang"
         if clang_path.exists():
-            return {"cc": str(clang_path), "cc-flags": ASAN_COMPILE_FLAGS}
+            return str(clang_path)
+    return None
+
+
+def macos_flags() -> dict[str, str]:
+    """Try Homebrew LLVM first (supports LSan), fall back to system clang."""
+    # Prefer Homebrew LLVM: supports both ASan and LSan (leak detection)
+    brew_clang = _find_brew_clang()
+    if brew_clang:
+        return {
+            "cc": brew_clang,
+            "cc-flags": ASAN_COMPILE_FLAGS,
+            "detect_leaks": "1",
+        }
+
+    # Fall back to system clang (Xcode 15+ supports ASan but NOT LSan)
+    system_cc = shutil.which("cc") or "/usr/bin/cc"
+    result = subprocess.run(
+        [system_cc, "-fsanitize=address", "-x", "c", "-", "-o", "/dev/null"],
+        input="int main(){return 0;}",
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return {
+            "cc": system_cc,
+            "cc-flags": ASAN_COMPILE_FLAGS,
+            "detect_leaks": "0",
+        }
+
     raise Exception(
-        "No Homebrew LLVM installation found (tried: " + ", ".join(llvm_opts) + ")"
+        "No ASan-capable compiler found. Install Homebrew LLVM: brew install llvm"
     )
 
 
 def linux_flags() -> dict[str, str]:
-    return {"cc": "gcc", "cc-flags": ASAN_COMPILE_FLAGS}
+    return {"cc": "gcc", "cc-flags": ASAN_COMPILE_FLAGS, "detect_leaks": "1"}
 
 
 def windows_flags() -> dict[str, str]:
     return {
         "cc": "cl",
         "cc-flags": "/DEBUG /fsanitize=address",
-        "stub-cc": "cl",
         "stub-cc-flags": "/DEBUG /fsanitize=address",
+        "detect_leaks": "0",
     }
 
 
@@ -130,7 +147,11 @@ def resolve_pkg_path(repo_root: Path, pkg_arg: str) -> Path:
 def patch_link_native_json(
     moon_pkg: dict[str, Any], flags: dict[str, str], pkg_path: Path
 ) -> None:
-    """Patch link.native in a parsed JSON dict with ASan flags."""
+    """Patch link.native in a parsed JSON dict with ASan flags.
+
+    Only patches compile/link FLAGS (cc-flags, stub-cc-flags, cc-link-flags).
+    The compiler path itself is set via MOON_CC/MOON_AR env vars.
+    """
     link = moon_pkg.get("link")
     if link is None:
         link = {}
@@ -144,22 +165,21 @@ def patch_link_native_json(
     elif not isinstance(native, dict):
         raise ValueError(f'Expected "link.native" object in {pkg_path}')
 
-    if "cc" in flags:
-        native["cc"] = flags["cc"]
+    # cc-flags: set ASan compile flags for MoonBit-generated C
     if "cc-flags" in flags:
         native["cc-flags"] = flags["cc-flags"]
 
+    # stub-cc-flags: append ASan flags to existing value (preserving -I, -D, etc.)
     existing_stub_flags = native.get("stub-cc-flags", "")
     if "stub-cc-flags" in flags:
+        # Windows: override entirely
         native["stub-cc-flags"] = flags["stub-cc-flags"]
     elif existing_stub_flags:
         native["stub-cc-flags"] = existing_stub_flags + " " + ASAN_COMPILE_FLAGS
     else:
         native["stub-cc-flags"] = ASAN_COMPILE_FLAGS
 
-    if "stub-cc" in flags:
-        native["stub-cc"] = flags["stub-cc"]
-
+    # cc-link-flags: prepend -fsanitize=address (preserving -framework, -l, etc.)
     existing_link_flags = native.get("cc-link-flags", "")
     if existing_link_flags:
         native["cc-link-flags"] = ASAN_LINK_FLAG + " " + existing_link_flags
@@ -235,7 +255,11 @@ def _replace_or_insert_in_native(text: str, key: str, value: str) -> str:
 
 
 def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
-    """Patch a moon.pkg DSL file using text manipulation. Returns the patched text."""
+    """Patch a moon.pkg DSL file using text manipulation. Returns the patched text.
+
+    Only patches compile/link FLAGS (cc-flags, stub-cc-flags, cc-link-flags).
+    The compiler path itself is set via MOON_CC/MOON_AR env vars.
+    """
     text = pkg_path.read_text(encoding="utf-8")
 
     if _find_native_block(text) is None:
@@ -244,15 +268,11 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
             "Cannot patch ASan flags without an existing link.native section."
         )
 
-    # 1. cc: set value
-    if "cc" in flags:
-        text = _replace_or_insert_in_native(text, "cc", flags["cc"])
-
-    # 2. cc-flags: set value
+    # 1. cc-flags: set ASan compile flags for MoonBit-generated C
     if "cc-flags" in flags:
         text = _replace_or_insert_in_native(text, "cc-flags", flags["cc-flags"])
 
-    # 3. stub-cc-flags: append ASan flags (or override on Windows)
+    # 2. stub-cc-flags: append ASan flags (or override on Windows)
     if "stub-cc-flags" in flags:
         text = _replace_or_insert_in_native(
             text, "stub-cc-flags", flags["stub-cc-flags"]
@@ -268,11 +288,7 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str]) -> str:
                 text, "stub-cc-flags", ASAN_COMPILE_FLAGS
             )
 
-    # 4. stub-cc: set if provided (Windows)
-    if "stub-cc" in flags:
-        text = _replace_or_insert_in_native(text, "stub-cc", flags["stub-cc"])
-
-    # 5. cc-link-flags: prepend -fsanitize=address
+    # 3. cc-link-flags: prepend -fsanitize=address
     m = re.search(r'"cc-link-flags"\s*:\s*"([^"]*)"', text)
     if m:
         existing = m.group(1)
@@ -339,9 +355,12 @@ def main():
         )
 
     flags = get_flags()
+    detect_leaks = flags.pop("detect_leaks", "1")
+    cc_path = flags.pop("cc")
     print(f"Platform: {platform.system()}")
-    print(f"ASan compiler: {flags['cc']}")
+    print(f"ASan compiler: {cc_path}")
     print(f"ASan compile flags: {flags['cc-flags']}")
+    print(f"Leak detection: {'enabled' if detect_leaks == '1' else 'disabled'}")
 
     # Snapshot originals
     snapshots: dict[Path, str] = {}
@@ -349,16 +368,16 @@ def main():
         snapshots[pkg_path] = pkg_path.read_text(encoding="utf-8")
 
     # Build environment
+    # MOON_CC overrides both cc and stub-cc via resolve_cc() in moon.
+    # MOON_AR must be set together with MOON_CC (ignored without it).
     env = os.environ.copy()
+    env["MOON_CC"] = cc_path
     if platform.system() != "Windows":
         env["MOON_AR"] = "/usr/bin/ar"
-        if platform.system() == "Darwin":
-            env["ASAN_OPTIONS"] = "detect_leaks=0"
-        else:
-            env["ASAN_OPTIONS"] = "detect_leaks=1"
-        lsan_suppressions = repo_root / ".lsan-suppressions"
-        if lsan_suppressions.exists():
-            env["LSAN_OPTIONS"] = f"suppressions={lsan_suppressions}"
+    env["ASAN_OPTIONS"] = f"detect_leaks={detect_leaks}"
+    lsan_suppressions = repo_root / ".lsan-suppressions"
+    if lsan_suppressions.exists():
+        env["LSAN_OPTIONS"] = f"suppressions={lsan_suppressions}"
 
     try:
         for pkg_path in pkg_paths:
