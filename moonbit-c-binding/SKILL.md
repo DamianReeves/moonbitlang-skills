@@ -43,15 +43,16 @@ Map C types to MoonBit types before writing any declarations.
 | `uint64_t` | `UInt64` | 64-bit unsigned |
 | `float` | `Float` | 32-bit float |
 | `double` | `Double` | 64-bit float |
-| `bool` | `Bool` | |
+| `bool` | `Bool` | C ABI is `int32_t`, not C `bool` |
 | `uint8_t`, `char` | `Byte` | Single byte |
 | `void` | `Unit` | Return type only |
-| `void *` (opaque handle) | `type Handle` (opaque) | External object with finalizer |
+| `void *` (opaque, GC-managed) | `type Handle` (opaque) | External object with finalizer |
+| `void *` (opaque, C-managed) | `#external type Handle` | No GC tracking; C manages lifetime |
 | `const uint8_t *`, `uint8_t *` | `Bytes` or `FixedArray[Byte]` | Use `#borrow` if C doesn't store it |
 | `const char *` (UTF-8 string) | `Bytes` | Null-terminated by runtime; pass directly to C |
 | `struct *` (small, no cleanup) | `struct Foo(Bytes)` | Value-as-Bytes pattern |
 | `struct *` (needs cleanup) | `type Foo` (opaque) | External object with finalizer |
-| `int` (enum/flags) | `UInt` or `Int` | Map to MoonBit enum in wrapper |
+| `int` (enum/flags) | `UInt`, `Int`, or constant `enum` | `enum Foo { A = 0; B = 1; C = 10 }` maps to `int32_t` |
 | callback function pointer | `FuncRef[...]` or closure | See @references/callbacks.md |
 | output `int *` | `Ref[Int]` | Borrow the Ref |
 
@@ -91,6 +92,7 @@ options(
 | `link(native("cc-flags": ...))` | Compile flags (`-I`, `-D`). Only for system libraries. |
 | `link(native("cc-link-flags": ...))` | Linker flags (`-L`, `-l`). Only for system libraries. |
 | `link(native("stub-cc-flags": ...))` | Compile flags for stub files only |
+| `link(native(exports: ...))` | Export MoonBit functions to C (reverse direction) |
 
 > **Warning — `supported-targets`:** Avoid `supported-targets: ["native"]`. It prevents downstream packages from building on other targets. Use `targets` to gate individual files instead.
 
@@ -100,9 +102,9 @@ options(
 
 ### Phase 2: FFI Layer
 
-Write extern declarations and C stubs together. Keep externs private; expose safe wrappers in Phase 3.
+Write extern declarations and C stubs together. Keep externs private; expose safe wrappers in Phase 3. Both `extern "c"` and `extern "C"` are valid — choose one casing and be consistent (e.g., match `extern "js"` if also targeting JS).
 
-**External object pattern** (C handle with cleanup):
+**External object pattern** (C handle with cleanup, GC-managed):
 
 ```mbt nocheck
 // ffi.mbt (gated to native in targets)
@@ -139,6 +141,23 @@ MoonBitTSParser *moonbit_ts_parser_new(void) {
   return p;
 }
 ```
+
+**`#external type` pattern** (C pointer, C-managed lifetime):
+
+When C fully manages the pointer's lifetime (no GC cleanup needed), use `#external type` instead. The pointer is passed as raw `void*` without reference counting:
+
+```mbt nocheck
+///|
+#external type RawPtr  // void*, not GC-tracked
+
+///|
+extern "c" fn raw_create() -> RawPtr = "lib_create"
+
+///|
+extern "c" fn raw_destroy(ptr : RawPtr) = "lib_destroy"
+```
+
+No C stub wrapper or `moonbit_make_external_object` is needed — the MoonBit extern calls the C function directly. Use this when the C API has explicit create/destroy functions and you want manual lifetime control.
 
 **Ownership annotations:**
 
@@ -276,6 +295,7 @@ See @references/asan-validation.md for details.
 | C reads pointer only during call | `#borrow(param)` | No decref in C |
 | C takes ownership of pointer | `#owned(param)` | C must `moonbit_decref` |
 | C handle needs cleanup on GC | External object + finalizer | `moonbit_make_external_object` |
+| C pointer, C manages lifetime | `#external type` | No GC tracking; call C destroy explicitly |
 | Small C struct, no cleanup | Value-as-Bytes | `moonbit_make_bytes` + `struct Foo(Bytes)` |
 | C returns null on failure | Nullable wrapper | Check null, return `Option` or raise error |
 | Callback with data parameter | FuncRef + Callback trick | See @references/callbacks.md |

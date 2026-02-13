@@ -18,6 +18,32 @@ without an ownership annotation is deprecated — new code should use
 struct wrappers): use `#owned` to transfer ownership to C. C must call
 `moonbit_decref()` when done.
 
+## Operation Tables
+
+What refcount operations are required for each action on a parameter:
+
+**`#borrow` parameters:**
+
+| Operation | Required action |
+|---|---|
+| Read field/element | nothing |
+| Store into data structure | `moonbit_incref` |
+| Pass to MoonBit function | `moonbit_incref` |
+| Pass to other C function | nothing |
+| Return | `moonbit_incref` |
+| End of scope | nothing |
+
+**`#owned` parameters (default if no annotation):**
+
+| Operation | Required action |
+|---|---|
+| Read field/element | nothing |
+| Store into data structure | nothing (already owned) |
+| Pass to MoonBit function | `moonbit_incref` |
+| Pass to other C function | nothing |
+| Return | nothing |
+| End of scope (not returned) | `moonbit_decref` |
+
 ## C-side `moonbit_decref` Rules
 
 With `#owned`, C owns each non-primitive parameter and must decref it:
