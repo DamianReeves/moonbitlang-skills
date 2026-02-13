@@ -1,6 +1,6 @@
 ---
 name: moonbit-c-binding
-description: Guide for writing MoonBit bindings to C libraries using native FFI. Use when adding extern "c" declarations, writing C stubs with moonbit.h, configuring native-stub and link.native in moon.pkg.json, choosing #borrow/#owned ownership annotations, designing callback trampolines, wrapping C pointers with external objects and finalizers, converting strings across FFI, or validating bindings with AddressSanitizer.
+description: Guide for writing MoonBit bindings to C libraries using native FFI. Use when adding extern "c" declarations, writing C stubs with moonbit.h, configuring native-stub and link.native in moon.pkg or moon.pkg.json, choosing #borrow/#owned ownership annotations, designing callback trampolines, wrapping C pointers with external objects and finalizers, converting strings across FFI, or validating bindings with AddressSanitizer.
 ---
 
 # MoonBit C Binding Guide
@@ -13,7 +13,7 @@ Use this skill when:
 
 - Adding `extern "c" fn` declarations for a C library
 - Writing C stub files (`moonbit.h`, `MOONBIT_FFI_EXPORT`)
-- Configuring `moon.pkg.json` for native builds (`native-stub`, `link.native`)
+- Configuring `moon.pkg` or `moon.pkg.json` for native builds (`native-stub`, `link.native`)
 - Choosing `#borrow` vs ownership transfer for FFI parameters
 - Wrapping C handles with external objects and finalizers
 - Implementing callback trampolines (closures or `FuncRef`)
@@ -333,19 +333,15 @@ moon test --target native -v
 **Run with AddressSanitizer** (catches use-after-free, leaks, overflows):
 
 ```bash
-# macOS (requires Homebrew LLVM)
-MOON_CC="$(brew --prefix llvm)/bin/clang -g -fsanitize=address" \
-ASAN_OPTIONS=detect_leaks=1 \
-moon test --target native -v
+python3 scripts/run-asan.py \
+  --repo-root <project-root> \
+  --pkg moon.pkg \
+  --pkg main/moon.pkg
 ```
 
-Or use the bundled script:
+The script supports both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format). It auto-detects the format, patches ASan flags into `cc`, `cc-flags`, `stub-cc-flags`, and `cc-link-flags`, runs tests, and restores the original files. Pass `--pkg` for ALL packages with `native-stub` or `cc-link-flags`.
 
-```bash
-python3 scripts/run-asan.py --repo-root <project-root> --pkg src/moon.pkg.json
-```
-
-`--pkg` accepts legacy `moon.pkg` paths too, but `moon.pkg.json` is the recommended form.
+> **Warning:** Do NOT use `MOON_CC` with flags (e.g., `MOON_CC="clang -fsanitize=address"`). Moon treats `MOON_CC` as a single executable path. Use the bundled script or patch `cc` in package config instead.
 
 See the ASan validation reference for platform setup and troubleshooting.
 

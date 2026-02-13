@@ -2,9 +2,7 @@
 
 Reference for detecting memory bugs in C stub code using AddressSanitizer.
 
----
-
-## 1. Why ASan Matters
+## Why ASan Matters
 
 C bindings introduce manual memory management invisible to MoonBit's GC. These bugs
 silently corrupt memory or leak resources. ASan catches them at runtime:
@@ -17,84 +15,53 @@ silently corrupt memory or leak resources. ASan catches them at runtime:
 | Buffer overflow | Wrong size passed to `moonbit_make_bytes` |
 | Use-after-return | Returning a pointer to a local C variable |
 
----
+## Quick Start
 
-## 2. Quick Start
-
-### One-liner (macOS with Homebrew LLVM)
-
-```bash
-MOON_CC="$(brew --prefix llvm)/bin/clang -g -fsanitize=address" \
-ASAN_OPTIONS=detect_leaks=1 \
-LSAN_OPTIONS=suppressions=$(pwd)/.lsan-suppressions \
-moon test --target native -v
-```
-
-### Environment Variable Approach
-
-From `moonbit-tree-sitter/scripts/test.py`:
-
-```python
-env["MOON_CC"] = flags["cc"] + " -g -fsanitize=address"
-env["MOON_AR"] = "/usr/bin/ar"
-env["ASAN_OPTIONS"] = "detect_leaks=1"
-lsan_suppressions = Path(".lsan-suppressions").resolve()
-env["LSAN_OPTIONS"] = f"suppressions={lsan_suppressions}"
-
-subprocess.run(
-    ["moon", "test", "--target", "native", "-v"], check=True, env=env
-)
-```
-
-| Variable | Purpose |
-|---|---|
-| `MOON_CC` | C compiler override. Must include `-fsanitize=address`. |
-| `MOON_AR` | Archiver. Set to `/usr/bin/ar` to avoid Homebrew incompatibilities. |
-| `ASAN_OPTIONS` | `detect_leaks=1` enables leak detection. |
-| `LSAN_OPTIONS` | Points to suppressions file for known system leaks. |
-
-### Alternative: Patching moon.pkg
-
-From `maria/scripts/test.py` -- patch `moon.pkg` temporarily:
-
-```python
-moon_pkg_json["link"]["native"] = {
-    "cc": str(clang_path),
-    "cc-flags": "-g -fsanitize=address -fno-omit-frame-pointer"
-}
-```
-
-Always restore the original in a `finally` block. Leftover ASan flags break normal builds.
-
----
-
-## 3. Using the Bundled Script
+### Using the Bundled Script (Recommended)
 
 The skill includes `scripts/run-asan.py` which automates the full workflow:
 
-1. Detect platform and find appropriate clang with ASan support.
-2. Snapshot and patch target `moon.pkg` files with ASan flags.
+1. Detect platform and find appropriate clang with ASan support (system clang on modern macOS, Homebrew LLVM as fallback, gcc on Linux).
+2. Snapshot and patch target package files with ASan flags in THREE places: `cc`/`cc-flags` (MoonBit-generated C), `stub-cc-flags` (C stubs), and `cc-link-flags` (linker).
 3. Run `moon test --target native -v` with ASan environment variables.
 4. Restore original files in `try/finally`, regardless of test outcome.
+
+Both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format) are supported. The script auto-detects the format based on filename and patches accordingly — DSL files are patched using text manipulation, JSON files using `json` module parsing.
 
 Single package:
 
 ```bash
-python3 scripts/run-asan.py --repo-root <project-root> --pkg src/moon.pkg
+python3 scripts/run-asan.py --repo-root <project-root> --pkg moon.pkg
 ```
 
-Multiple packages:
+Multiple packages (include ALL packages with `native-stub` or `cc-link-flags`):
 
 ```bash
 python3 scripts/run-asan.py \
   --repo-root <project-root> \
-  --pkg src/moon.pkg \
-  --pkg src/internal/moon.pkg
+  --pkg moon.pkg \
+  --pkg main/moon.pkg
 ```
+
+The `--pkg` argument resolves either format automatically: passing `moon.pkg.json` finds `moon.pkg` if the JSON file doesn't exist, and vice versa.
+
+### Manual Approach: Patching Package Config
+
+If not using the script, temporarily patch the package config. ASan flags must be added to **three** fields inside `link.native`:
+
+| Field | What to set | Why |
+|---|---|---|
+| `cc` + `cc-flags` | `"cc": "/usr/bin/cc"`, `"cc-flags": "-g -fsanitize=address"` | Instruments MoonBit-generated C code |
+| `stub-cc-flags` | Append `-g -fsanitize=address` to existing value | Instruments C stub files (preserves `-I`, `-D` flags) |
+| `cc-link-flags` | Prepend `-fsanitize=address` to existing value | Links ASan runtime (preserves `-framework`, `-l` flags) |
+
+**Important:** Patch ALL packages that produce executables — both library packages (with `native-stub`) and `is-main`/test packages (with `cc-link-flags`). Always restore originals in a `finally` block.
+
+> **Warning — `MOON_CC` environment variable:** Do NOT use `MOON_CC` with flags (e.g., `MOON_CC="clang -fsanitize=address"`). Moon treats `MOON_CC` as a single executable path, not a command line. Use the `cc` field in package config instead.
 
 ---
 
-## 4. GitHub Actions Workflow
+## 2. GitHub Actions Workflow
 
 For CI integration, disable mimalloc (which interferes with ASan) and run tests with `ASAN_OPTIONS`. Example from `moonbitlang/async`:
 
@@ -150,42 +117,25 @@ For Windows, use `cl.exe` instead of `gcc`:
 
 ---
 
-## 5. Platform Setup
+## 3. Platform Setup
 
 ### macOS
 
-System clang (Xcode) does **not** include the ASan runtime. Use Homebrew LLVM:
+**System clang (Xcode 15+)** supports ASan on modern macOS. The bundled script tries system clang first by compiling a test program with `-fsanitize=address`. If that works, no additional installation is needed.
 
-```bash
-brew install llvm
-```
+**Homebrew LLVM** is used as a fallback if system clang doesn't support ASan (older Xcode versions). The script probes several versioned formulae automatically (`llvm`, `llvm@18`, `llvm@19`, `llvm@15`, `llvm@13`).
 
-The bundled script probes several versioned formulae automatically:
+**Leak detection (LSan)** is **not supported** on macOS with Apple Clang. The script automatically sets `detect_leaks=0` on Darwin. For leak detection, use Linux or Homebrew LLVM's clang.
 
-```python
-llvm_opts = ["llvm", "llvm@18", "llvm@19", "llvm@15", "llvm@13"]
-for llvm in llvm_opts:
-    llvm_prefix = subprocess.run(
-        ["brew", "--prefix", llvm], check=True, text=True, capture_output=True
-    ).stdout.strip()
-    clang_path = Path(llvm_prefix) / "bin" / "clang"
-    if clang_path.exists():
-        return {"cc": str(clang_path), "cc-flags": "-g"}
-```
+**MOON_AR** must be set to `/usr/bin/ar` when overriding `cc`. Otherwise moon may look for `ar` in the same prefix as the compiler (e.g., `/opt/homebrew/opt/llvm/bin/ar`), which may not exist.
 
 ### Linux
 
-System `gcc` or `clang` on most distributions includes ASan out of the box:
-
-```bash
-MOON_CC="gcc -g -fsanitize=address" moon test --target native -v
-```
-
-On minimal images, install `libasan` (e.g., `apt-get install libasan6`).
+System `gcc` or `clang` on most distributions includes ASan out of the box. On minimal images, install `libasan` (e.g., `apt-get install libasan6`).
 
 ---
 
-## 6. Leak Suppressions
+## 4. Leak Suppressions
 
 Place `.lsan-suppressions` at your project root to ignore known system library leaks:
 
@@ -203,7 +153,7 @@ leaks in your own C stub functions.
 
 ---
 
-## 7. Interpreting Results
+## 5. Interpreting Results
 
 ### heap-use-after-free
 
