@@ -264,48 +264,229 @@ def patch_json_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> st
 # ---------------------------------------------------------------------------
 
 
-def _find_native_block(text: str) -> tuple[int, int] | None:
-    """Find the start and end positions of the "native": { ... } block.
-
-    Returns (start_of_content, end_of_closing_brace) or None.
-    """
-    m = re.search(r'"native"\s*:\s*\{', text)
+def _find_object_block(
+    text: str,
+    key: str,
+    search_start: int = 0,
+    search_end: int | None = None,
+) -> tuple[int, int] | None:
+    """Find the start and end positions of a key: { ... } object block."""
+    key_pattern = rf'(?:{re.escape(key)}|"{re.escape(key)}")'
+    haystack = text[search_start:search_end]
+    m = re.search(rf"{key_pattern}\s*:\s*\{{", haystack)
     if m is None:
         return None
-    start = m.end()
+    start = search_start + m.end()
     depth = 1
     pos = start
+    limit = len(text) if search_end is None else search_end
+    while pos < limit and depth > 0:
+        if text[pos] == "{":
+            depth += 1
+        elif text[pos] == "}":
+            depth -= 1
+        pos += 1
+    if depth != 0:
+        return None
+    return (start, pos)
+
+
+def _find_root_block(text: str) -> tuple[int, int] | None:
+    """Find the outermost { ... } block in the file."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 1
+    pos = start + 1
     while pos < len(text) and depth > 0:
         if text[pos] == "{":
             depth += 1
         elif text[pos] == "}":
             depth -= 1
         pos += 1
+    if depth != 0:
+        return None
+    return (start + 1, pos)
+
+
+def _find_options_block(text: str) -> tuple[int, int] | None:
+    """Find the start and end positions of options( ... ) content."""
+    m = re.search(r"\boptions\s*\(", text)
+    if m is None:
+        return None
+    start = m.end()
+    depth = 1
+    pos = start
+    while pos < len(text) and depth > 0:
+        if text[pos] == "(":
+            depth += 1
+        elif text[pos] == ")":
+            depth -= 1
+        pos += 1
+    if depth != 0:
+        return None
     return (start, pos)
 
 
-def _detect_native_indent(text: str, content_start: int, content_end: int) -> str:
-    """Detect the indentation used for entries inside the native block."""
-    m = re.search(r"\n(\s+)\"", text[content_start : content_end - 1])
+def _find_link_block(
+    text: str,
+    search_start: int = 0,
+    search_end: int | None = None,
+) -> tuple[int, int] | None:
+    """Find the start and end positions of the link: { ... } block."""
+    return _find_object_block(text, "link", search_start, search_end)
+
+
+def _find_native_block(text: str) -> tuple[int, int] | None:
+    """Find the start and end positions of the native: { ... } block."""
+    return _find_object_block(text, "native")
+
+
+def _closing_indent(text: str, closing_brace: int) -> str:
+    """Return indentation before a closing brace on its current line."""
+    line_start = text.rfind("\n", 0, closing_brace) + 1
+    indent = text[line_start:closing_brace]
+    return indent if indent.isspace() else ""
+
+
+def _detect_entry_indent(text: str, content_start: int, content_end: int) -> str:
+    """Detect indentation for key entries in a container."""
+    m = re.search(r"\n(\s+)\S", text[content_start : content_end - 1])
     return m.group(1) if m else "      "
 
 
-def _replace_or_insert_in_native(text: str, key: str, value: str) -> str:
-    """Replace an existing key's value or insert a new key-value pair in the native block."""
-    # Try to replace existing key
-    pattern = re.compile(rf'("{re.escape(key)}"\s*:\s*)"([^"]*)"')
-    if pattern.search(text):
-        return pattern.sub(rf'\g<1>"{value}"', text)
+def _insert_entry_in_container(
+    text: str,
+    content_start: int,
+    container_end: int,
+    entry: str,
+    entry_indent: str,
+) -> str:
+    """Insert an entry into a comma-separated container preserving syntax."""
+    closing_brace = container_end - 1
+    block_content = text[content_start:closing_brace]
+    has_entries = bool(block_content.strip())
+    multiline = "\n" in block_content
 
-    # Insert new entry before closing } of "native" block
+    if not has_entries:
+        if multiline:
+            insertion = f"\n{entry_indent}{entry},\n{_closing_indent(text, closing_brace)}"
+        else:
+            insertion = f" {entry} "
+        return text[:content_start] + insertion + text[closing_brace:]
+
+    last = closing_brace - 1
+    while last >= content_start and text[last].isspace():
+        last -= 1
+    if last < content_start:
+        return text
+
+    needs_comma = text[last] != ","
+    if multiline:
+        separator = "," if needs_comma else ""
+        insertion = (
+            f"{separator}\n{entry_indent}{entry},\n{_closing_indent(text, closing_brace)}"
+        )
+    else:
+        tail_ws = text[last + 1 : closing_brace]
+        separator = ", " if needs_comma else " "
+        insertion = f"{separator}{entry}{tail_ws}"
+    return text[: last + 1] + insertion + text[closing_brace:]
+
+
+def _insert_entry_in_block(
+    text: str,
+    content_start: int,
+    block_end: int,
+    entry: str,
+    entry_indent: str,
+) -> str:
+    """Insert an entry into a { ... } block while preserving valid syntax."""
+    return _insert_entry_in_container(text, content_start, block_end, entry, entry_indent)
+
+
+def _ensure_native_block(text: str) -> str:
+    """Ensure link.native exists by creating missing blocks when needed."""
+    if _find_native_block(text) is not None:
+        return text
+
+    options_bounds = _find_options_block(text)
+    if options_bounds is not None:
+        options_start, options_end = options_bounds
+        link_bounds = _find_link_block(text, options_start, options_end)
+        if link_bounds is not None:
+            content_start, block_end = link_bounds
+            entry_indent = _detect_entry_indent(text, content_start, block_end)
+            return _insert_entry_in_block(
+                text, content_start, block_end, '"native": {}', entry_indent
+            )
+
+        entry_indent = _detect_entry_indent(text, options_start, options_end)
+        return _insert_entry_in_container(
+            text,
+            options_start,
+            options_end,
+            'link: { "native": {} }',
+            entry_indent,
+        )
+
+    link_bounds = _find_link_block(text)
+    if link_bounds is not None:
+        content_start, block_end = link_bounds
+        entry_indent = _detect_entry_indent(text, content_start, block_end)
+        return _insert_entry_in_block(
+            text, content_start, block_end, '"native": {}', entry_indent
+        )
+
+    root_bounds = _find_root_block(text)
+    if root_bounds is None:
+        raise ValueError("Could not locate root object block in moon.pkg")
+    content_start, block_end = root_bounds
+    m = re.search(r"\n(\s+)\S", text[content_start : block_end - 1])
+    entry_indent = m.group(1) if m else "  "
+    return _insert_entry_in_block(
+        text,
+        content_start,
+        block_end,
+        '"link": { "native": {} }',
+        entry_indent,
+    )
+
+
+def _find_string_value_in_native(text: str, key: str) -> str | None:
+    """Find a string value for key inside native block."""
+    bounds = _find_native_block(text)
+    if bounds is None:
+        return None
+    content_start, block_end = bounds
+    native_text = text[content_start : block_end - 1]
+    pattern = re.compile(rf'(?:{re.escape(key)}|"{re.escape(key)}")\s*:\s*"([^"]*)"')
+    m = pattern.search(native_text)
+    return m.group(1) if m else None
+
+
+def _replace_or_insert_in_native(text: str, key: str, value: str) -> str:
+    """Replace an existing key's value or insert a new key-value pair in native."""
     bounds = _find_native_block(text)
     if bounds is None:
         raise ValueError('No "native" block found in moon.pkg')
     content_start, block_end = bounds
-    closing_brace = block_end - 1
-    indent = _detect_native_indent(text, content_start, block_end)
-    insertion = f'{indent}"{key}": "{value}",\n'
-    return text[:closing_brace] + insertion + text[closing_brace:]
+    native_text = text[content_start : block_end - 1]
+
+    # Replace existing key only inside native block.
+    pattern = re.compile(rf'((?:{re.escape(key)}|"{re.escape(key)}")\s*:\s*)"([^"]*)"')
+    if pattern.search(native_text):
+        replaced = pattern.sub(rf'\g<1>"{value}"', native_text, count=1)
+        return text[:content_start] + replaced + text[block_end - 1 :]
+
+    entry_indent = _detect_entry_indent(text, content_start, block_end)
+    return _insert_entry_in_block(
+        text,
+        content_start,
+        block_end,
+        f'"{key}": "{value}"',
+        entry_indent,
+    )
 
 
 def patch_dsl_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> str:
@@ -314,12 +495,10 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> str
     Always patches stub-cc-flags. Only patches cc-flags when is_entry is True.
     """
     text = pkg_path.read_text(encoding="utf-8")
-
-    if _find_native_block(text) is None:
-        sys.exit(
-            f'No "native" block found in {pkg_path}. '
-            "Cannot patch ASan flags without an existing link.native section."
-        )
+    try:
+        text = _ensure_native_block(text)
+    except ValueError as error:
+        sys.exit(f"Failed to patch {pkg_path}: {error}")
 
     # 1. cc-flags: set ASan compile flags for MoonBit-generated C (entry packages only)
     if is_entry and "cc-flags" in flags:
@@ -331,9 +510,8 @@ def patch_dsl_file(pkg_path: Path, flags: dict[str, str], is_entry: bool) -> str
             text, "stub-cc-flags", flags["stub-cc-flags"]
         )
     else:
-        m = re.search(r'"stub-cc-flags"\s*:\s*"([^"]*)"', text)
-        if m:
-            existing = m.group(1)
+        existing = _find_string_value_in_native(text, "stub-cc-flags")
+        if existing is not None:
             new_value = f"{existing} {ASAN_COMPILE_FLAGS}"
             text = _replace_or_insert_in_native(text, "stub-cc-flags", new_value)
         else:
@@ -359,11 +537,14 @@ def _is_entry_package(pkg_path: Path) -> bool:
     text = pkg_path.read_text(encoding="utf-8")
     # Check is-main in config
     if is_dsl_format(pkg_path):
-        if re.search(r'"is-main"\s*:\s*true', text):
+        if re.search(
+            r'(?:is-main|is_main|"is-main"|"is_main")\s*:\s*true\b',
+            text,
+        ):
             return True
     else:
         data = json.loads(text)
-        if data.get("is-main"):
+        if data.get("is-main") or data.get("is_main"):
             return True
     # Check for *_test.mbt files in the same directory
     pkg_dir = pkg_path.parent
