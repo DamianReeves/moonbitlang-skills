@@ -3,14 +3,16 @@
 
 Snapshots each specified package file (`moon.pkg` DSL or `moon.pkg.json`),
 patches `link.native` with ASan compile/link flags, sets MOON_CC/MOON_AR
-env vars to override the compiler, runs `moon test`, and restores originals
-in a finally block.
+env vars to override the compiler, disables mimalloc, runs `moon test`,
+and restores everything in a finally block.
 
-The script uses two mechanisms:
+The script uses three mechanisms:
   - MOON_CC/MOON_AR env vars: override the compiler and archiver for both
     MoonBit-generated C and stub C compilation (avoids ASan runtime mismatches)
   - Package config patching: adds ASan flags to cc-flags, stub-cc-flags,
     and cc-link-flags (preserving existing flags like -I, -D, -framework)
+  - mimalloc disable: replaces libmoonbitrun.o with a dummy empty object so
+    ASan can intercept all memory allocations
 
 Both `moon.pkg` (DSL format) and `moon.pkg.json` (JSON format) are supported.
 All specified `--pkg` files are patched (both library and is-main packages).
@@ -24,11 +26,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 
-ASAN_COMPILE_FLAGS = "-g -fsanitize=address"
+ASAN_COMPILE_FLAGS = "-g -fsanitize=address -fno-omit-frame-pointer"
 ASAN_LINK_FLAG = "-fsanitize=address"
 
 
@@ -92,8 +95,8 @@ def linux_flags() -> dict[str, str]:
 def windows_flags() -> dict[str, str]:
     return {
         "cc": "cl",
-        "cc-flags": "/DEBUG /fsanitize=address",
-        "stub-cc-flags": "/DEBUG /fsanitize=address",
+        "cc-flags": "/Z7 /fsanitize=address",
+        "stub-cc-flags": "/Z7 /fsanitize=address",
         "detect_leaks": "0",
     }
 
@@ -107,6 +110,71 @@ def get_flags() -> dict[str, str]:
     elif system == "Windows":
         return windows_flags()
     raise Exception(f"Unsupported platform: {system}")
+
+
+# ---------------------------------------------------------------------------
+# mimalloc disable
+# ---------------------------------------------------------------------------
+
+
+def _find_libmoonbitrun() -> Path | None:
+    """Find libmoonbitrun.o by deriving the path from the moon binary."""
+    moon_bin = shutil.which("moon")
+    if not moon_bin:
+        return None
+    lib_dir = Path(moon_bin).resolve().parent.parent / "lib"
+    moonbitrun = lib_dir / "libmoonbitrun.o"
+    if moonbitrun.exists():
+        return moonbitrun
+    # Fallback: ~/.moon/lib/
+    moonbitrun = Path.home() / ".moon" / "lib" / "libmoonbitrun.o"
+    if moonbitrun.exists():
+        return moonbitrun
+    return None
+
+
+def disable_mimalloc(cc_path: str) -> tuple[Path, bytes] | None:
+    """Replace libmoonbitrun.o with a dummy empty object to disable mimalloc.
+
+    MoonBit bundles mimalloc as its allocator via libmoonbitrun.o. mimalloc
+    intercepts malloc/free, which prevents ASan from tracking allocations.
+    Replacing it with an empty object lets ASan's allocator take over.
+
+    Returns (path, original_bytes) for restoration, or None if not found.
+    """
+    moonbitrun = _find_libmoonbitrun()
+    if moonbitrun is None:
+        print("Warning: libmoonbitrun.o not found, skipping mimalloc disable")
+        return None
+
+    original = moonbitrun.read_bytes()
+
+    # Compile an empty C file as the replacement
+    fd, dummy_c = tempfile.mkstemp(suffix=".c")
+    os.close(fd)
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(
+                ["cl.exe", dummy_c, "/c", f"/Fo:{moonbitrun}"],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            subprocess.run(
+                [cc_path, "-c", dummy_c, "-o", str(moonbitrun)],
+                check=True,
+                capture_output=True,
+            )
+    finally:
+        os.unlink(dummy_c)
+
+    print(f"Disabled mimalloc: {moonbitrun}")
+    return (moonbitrun, original)
+
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
 
 
 def display_path(path: Path, repo_root: Path) -> str:
@@ -328,6 +396,11 @@ def main():
             "Must include ALL packages with native-stub or cc-link-flags."
         ),
     )
+    parser.add_argument(
+        "--no-disable-mimalloc",
+        action="store_true",
+        help="Skip disabling mimalloc (not recommended).",
+    )
     args = parser.parse_args()
 
     repo_root = args.repo_root.resolve()
@@ -367,6 +440,13 @@ def main():
     for pkg_path in pkg_paths:
         snapshots[pkg_path] = pkg_path.read_text(encoding="utf-8")
 
+    # Disable mimalloc by replacing libmoonbitrun.o with an empty object.
+    # MoonBit bundles mimalloc which intercepts malloc/free and prevents
+    # ASan from tracking allocations properly.
+    mimalloc_backup: tuple[Path, bytes] | None = None
+    if not args.no_disable_mimalloc:
+        mimalloc_backup = disable_mimalloc(cc_path)
+
     # Build environment
     # MOON_CC overrides both cc and stub-cc via resolve_cc() in moon.
     # MOON_AR must be set together with MOON_CC (ignored without it).
@@ -374,7 +454,8 @@ def main():
     env["MOON_CC"] = cc_path
     if platform.system() != "Windows":
         env["MOON_AR"] = "/usr/bin/ar"
-    env["ASAN_OPTIONS"] = f"detect_leaks={detect_leaks}"
+    asan_opts = f"detect_leaks={detect_leaks}:fast_unwind_on_malloc=0"
+    env["ASAN_OPTIONS"] = asan_opts
     lsan_suppressions = repo_root / ".lsan-suppressions"
     if lsan_suppressions.exists():
         env["LSAN_OPTIONS"] = f"suppressions={lsan_suppressions}"
@@ -399,6 +480,10 @@ def main():
         for pkg_path, original in snapshots.items():
             pkg_path.write_text(original, encoding="utf-8")
             print(f"Restored: {display_path(pkg_path, repo_root)}")
+        if mimalloc_backup is not None:
+            moonbitrun_path, original_bytes = mimalloc_backup
+            moonbitrun_path.write_bytes(original_bytes)
+            print(f"Restored mimalloc: {moonbitrun_path}")
 
 
 if __name__ == "__main__":

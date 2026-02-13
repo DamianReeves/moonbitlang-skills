@@ -86,8 +86,10 @@ with `MOON_CC` — it is ignored without it.
 
 ## 2. GitHub Actions Workflow
 
-For CI integration, disable mimalloc (which interferes with ASan) and run tests
-with `ASAN_OPTIONS`. Example from `moonbitlang/async`:
+For CI integration, the script handles everything automatically. Alternatively,
+you can set up the steps manually. Both approaches are shown below.
+
+### Using `run-asan.py` (Recommended)
 
 ```yaml
 sanitizer-check:
@@ -95,42 +97,53 @@ sanitizer-check:
   timeout-minutes: 10
   steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-node@v6
-      with:
-        node-version: '>=22.4.0'
 
-    - name: install
+    - name: install moonbit
       run: |
         curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
         echo "$HOME/.moon/bin" >> $GITHUB_PATH
 
-    - name: moon version
-      run: |
-        moon version --all
-        moonrun --version
-
     - name: moon update
-      run: |
-        moon update
+      run: moon update
 
-    - name: disable mimalloc
+    - name: run tests with ASan
       run: |
-        echo "" >dummy_libmoonbitrun.c
-        gcc dummy_libmoonbitrun.c -c -o ~/.moon/lib/libmoonbitrun.o
-
-    - name: run test with address sanitizer
-      run: |
-        export ASAN_OPTIONS=fast_unwind_on_malloc=0
-        moon test
+        python3 scripts/run-asan.py \
+          --repo-root . \
+          --pkg moon.pkg \
+          --pkg main/moon.pkg
 ```
 
-**Key steps:**
+The script automatically handles mimalloc disable, compiler selection, flag
+patching, `ASAN_OPTIONS`, and cleanup. On Linux CI, system `gcc` is used with
+full leak detection support.
 
-1. **Disable mimalloc**: MoonBit's default allocator conflicts with ASan. Replace `libmoonbitrun.o` with a dummy object.
-2. **Set `ASAN_OPTIONS`**: Use `fast_unwind_on_malloc=0` for more accurate stack traces (slower but clearer).
-3. **Run tests**: `moon test` defaults to native backend if `preferred-target` is set.
+### Manual Approach
 
-For Windows, use `cl.exe` instead of `gcc`:
+Without the script, you must perform all three steps yourself:
+
+1. **Disable mimalloc**: Replace `libmoonbitrun.o` with an empty object. MoonBit bundles mimalloc as its allocator, which intercepts `malloc`/`free` and prevents ASan from tracking allocations.
+
+2. **Patch package config files**: Add ASan flags to every `moon.pkg` (or `moon.pkg.json`) that has `native-stub` or `cc-link-flags`. There is no `MOON_CFLAGS` env var — `MOON_CC` only accepts a compiler path, so flags must go in the package config:
+
+   | Field | What to set | Why |
+   |---|---|---|
+   | `cc-flags` | `"-g -fsanitize=address -fno-omit-frame-pointer"` | Instruments MoonBit-generated C code |
+   | `stub-cc-flags` | Append `-g -fsanitize=address -fno-omit-frame-pointer` | Instruments C stub files (preserve existing `-I`, `-D` flags) |
+   | `cc-link-flags` | Prepend `-fsanitize=address` | Links ASan runtime (preserve existing `-framework`, `-l` flags) |
+
+   On macOS, also set `MOON_CC` and `MOON_AR` to avoid ASan runtime version mismatches (see Platform Setup section).
+
+3. **Run tests** with `ASAN_OPTIONS`:
+   ```bash
+   ASAN_OPTIONS="detect_leaks=1:fast_unwind_on_malloc=0" moon test --target native -v
+   ```
+
+4. **Restore** all modified package files and `libmoonbitrun.o` afterward.
+
+Because the manual approach requires patching and restoring multiple files, the script is strongly recommended — especially in CI where cleanup must happen even on test failure.
+
+For Windows CI, use `cl.exe` to compile the dummy object:
 
 ```yaml
 - name: disable mimalloc
