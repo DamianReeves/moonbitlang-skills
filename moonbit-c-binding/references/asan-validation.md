@@ -123,7 +123,8 @@ mimalloc manually:
 
 ```powershell
 echo "" >dummy_libmoonbitrun.c
-$out_path = Convert-Path ~/.moon/lib/libmoonbitrun.o
+$moon_home = if ($env:MOON_HOME) { $env:MOON_HOME } else { "$env:USERPROFILE\.moon" }
+$out_path = Convert-Path "$moon_home\lib\libmoonbitrun.o"
 cl.exe dummy_libmoonbitrun.c /c /Fo: $out_path
 ```
 

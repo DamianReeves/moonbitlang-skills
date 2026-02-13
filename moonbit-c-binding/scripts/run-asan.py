@@ -126,8 +126,9 @@ def _find_libmoonbitrun() -> Path | None:
     moonbitrun = lib_dir / "libmoonbitrun.o"
     if moonbitrun.exists():
         return moonbitrun
-    # Fallback: ~/.moon/lib/
-    moonbitrun = Path.home() / ".moon" / "lib" / "libmoonbitrun.o"
+    # Fallback: $MOON_HOME/lib/ (default: ~/.moon/lib/)
+    moon_home = os.environ.get("MOON_HOME", str(Path.home() / ".moon"))
+    moonbitrun = Path(moon_home) / "lib" / "libmoonbitrun.o"
     if moonbitrun.exists():
         return moonbitrun
     return None
