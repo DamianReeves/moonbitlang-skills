@@ -51,12 +51,12 @@ With `#owned`, C owns each non-primitive parameter and must decref it:
 ```c
 MOONBIT_FFI_EXPORT
 int32_t
-moonbit_llhttp_execute(llhttp_t *parser, moonbit_bytes_t data) {
-  size_t len = strlen((const char *)data);
-  llhttp_errno_t errno = llhttp_execute(parser, (const char *)data, len);
-  moonbit_decref(parser);  // Decrement after use
+moonbit_process(void *handle, moonbit_bytes_t data) {
+  size_t len = Moonbit_array_length(data);
+  int32_t result = lib_process(handle, (const char *)data, len);
+  moonbit_decref(handle);  // Decrement after use
   moonbit_decref(data);    // Decrement byte data
-  return errno;
+  return result;
 }
 ```
 
